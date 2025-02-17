@@ -4,10 +4,8 @@ import librosa
 import numpy as np
 from scipy.signal import get_window
 from typing import List, Tuple, Optional
-
-def init_weights(m, mean=0.0, std=0.01):
-    if isinstance(m, nn.Conv1d):
-        m.weight = mx.random.normal(mean, std, m.weight.shape)
+import time
+from ..interpolate import interpolate
 
 def get_padding(kernel_size: int, dilation: int = 1) -> int:
     return int((kernel_size * dilation - dilation) / 2)
@@ -45,7 +43,12 @@ class AdaIN1d(nn.Module):
         h = self.fc(s)
         h = mx.expand_dims(h, axis=2)  # Equivalent to view(..., 1)
         gamma, beta = mx.split(h, 2, axis=1)
-        return (1 + gamma) * self.norm(x) + beta
+        if x.shape[1] == gamma.shape[1]:
+            x = (1 + gamma) * self.norm(x) + beta
+        else:
+            x = (1 + gamma) * self.norm(x.transpose(0, 2, 1)) + beta
+            x = x.transpose(0, 2, 1)
+        return x
 
 class AdaINResBlock1(nn.Module):
     def __init__(self, channels: int, kernel_size: int = 3,
@@ -74,10 +77,14 @@ class AdaINResBlock1(nn.Module):
                                          self.alpha1, self.alpha2):
             xt = n1(x, s)
             xt = xt + (1 / a1) * (mx.sin(a1 * xt) ** 2)  # Snake1D
+            xt = mx.transpose(xt, (0, 2, 1))
             xt = c1(xt)
+            xt = mx.transpose(xt, (0, 2, 1))
             xt = n2(xt, s)
             xt = xt + (1 / a2) * (mx.sin(a2 * xt) ** 2)  # Snake1D
+            xt = mx.transpose(xt, (0, 2, 1))
             xt = c2(xt)
+            xt = mx.transpose(xt, (0, 2, 1))
             x = xt + x
         return x
 
@@ -184,42 +191,57 @@ class SineGen(nn.Module):
         return mx.array(f0 > self.voiced_threshold, dtype=mx.float32)
 
     def _f02sine(self, f0_values: mx.array) -> mx.array:
-        # Convert to F0 in rad
-        rad_values = mx.mod(f0_values / self.sampling_rate, 1)
-
-        # Initial phase noise
-        rand_ini = mx.random.uniform(shape=(f0_values.shape[0], f0_values.shape[2]))
-        rand_ini = mx.index_update(rand_ini, (slice(None), 0), 0)
-        rad_values = mx.index_update(rad_values[:, 0, :], slice(None),
-                                   rad_values[:, 0, :] + rand_ini)
-
+        """ f0_values: (batchsize, length, dim)
+            where dim indicates fundamental tone and overtones
+        """
+        # convert to F0 in rad. The interger part n can be ignored
+        # because 2 * np.pi * n doesn't affect phase
+        rad_values = (f0_values / self.sampling_rate) % 1
+        # initial phase noise (no noise for fundamental component)
+        rand_ini = mx.random.normal((f0_values.shape[0], f0_values.shape[2]))
+        rand_ini[:, 0] = 0
+        rad_values[:, 0, :] = rad_values[:, 0, :] + rand_ini
+        # instantanouse phase sine[t] = sin(2*pi \sum_i=1 ^{t} rad)
         if not self.flag_for_pulse:
-            # Interpolate rad_values
-            rad_values_t = mx.transpose(rad_values, (0, 2, 1))
-            rad_values_t = mx.interpolate(rad_values_t,
-                                        scale_factor=1/self.upsample_scale,
-                                        mode="linear")
-            rad_values = mx.transpose(rad_values_t, (0, 2, 1))
-
-            # Calculate phase
+            rad_values = interpolate(rad_values.transpose(0, 2, 1), scale_factor=1/self.upsample_scale, mode="linear").transpose(0, 2, 1)
             phase = mx.cumsum(rad_values, axis=1) * 2 * np.pi
-            phase_t = mx.transpose(phase, (0, 2, 1)) * self.upsample_scale
-            phase_t = mx.interpolate(phase_t,
-                                   scale_factor=self.upsample_scale,
-                                   mode="linear")
-            phase = mx.transpose(phase_t, (0, 2, 1))
-            return mx.sin(phase)
+            phase = interpolate(phase.transpose(0, 2, 1) * self.upsample_scale, scale_factor=self.upsample_scale, mode="linear").transpose(0, 2, 1)
+            sines = mx.sin(phase)
         else:
-            # Pulse train generation logic would go here
-            raise NotImplementedError("Pulse train generation not yet implemented")
+            # If necessary, make sure that the first time step of every
+            # voiced segments is sin(pi) or cos(0)
+            # This is used for pulse-train generation
+            # identify the last time step in unvoiced segments
+            uv = self._f02uv(f0_values)
+            uv_1 = mx.roll(uv, shifts=-1, axis=1)
+            uv_1[:, -1, :] = 1
+            u_loc = (uv < 1) * (uv_1 > 0)
+            # get the instantanouse phase
+            tmp_cumsum = mx.cumsum(rad_values, axis=1)
+            # different batch needs to be processed differently
+            for idx in range(f0_values.shape[0]):
+                temp_sum = tmp_cumsum[idx, u_loc[idx, :, 0], :]
+                temp_sum[1:, :] = temp_sum[1:, :] - temp_sum[0:-1, :]
+                # stores the accumulation of i.phase within
+                # each voiced segments
+                tmp_cumsum[idx, :, :] = 0
+                tmp_cumsum[idx, u_loc[idx, :, 0], :] = temp_sum
+            # rad_values - tmp_cumsum: remove the accumulation of i.phase
+            # within the previous voiced segment.
+            i_phase = mx.cumsum(rad_values - tmp_cumsum, axis=1)
+            # get the sines
+            sines = mx.cos(i_phase * 2 * np.pi)
+        return sines
 
     def __call__(self, f0: mx.array) -> Tuple[mx.array, mx.array, mx.array]:
         f0_buf = mx.zeros((f0.shape[0], f0.shape[1], self.dim))
+
         # Fundamental component
-        fn = f0 * mx.array(range(1, self.harmonic_num + 2))[None, None, :]
+        fn = f0 * mx.arange(1, self.harmonic_num + 2)[None, None, :]
 
         # Generate sine waveforms
         sine_waves = self._f02sine(fn) * self.sine_amp
+
 
         # Generate UV signal
         uv = self._f02uv(f0)
@@ -230,3 +252,264 @@ class SineGen(nn.Module):
 
         sine_waves = sine_waves * uv + noise
         return sine_waves, uv, noise
+
+
+
+class SourceModuleHnNSF(nn.Module):
+    """ SourceModule for hn-nsf
+    SourceModule(sampling_rate, harmonic_num=0, sine_amp=0.1,
+                 add_noise_std=0.003, voiced_threshod=0)
+    sampling_rate: sampling_rate in Hz
+    harmonic_num: number of harmonic above F0 (default: 0)
+    sine_amp: amplitude of sine source signal (default: 0.1)
+    add_noise_std: std of additive Gaussian noise (default: 0.003)
+        note that amplitude of noise in unvoiced is decided
+        by sine_amp
+    voiced_threshold: threhold to set U/V given F0 (default: 0)
+    Sine_source, noise_source = SourceModuleHnNSF(F0_sampled)
+    F0_sampled (batchsize, length, 1)
+    Sine_source (batchsize, length, 1)
+    noise_source (batchsize, length 1)
+    uv (batchsize, length, 1)
+    """
+    def __init__(self, sampling_rate, upsample_scale, harmonic_num=0, sine_amp=0.1,
+                 add_noise_std=0.003, voiced_threshod=0):
+        super(SourceModuleHnNSF, self).__init__()
+        self.sine_amp = sine_amp
+        self.noise_std = add_noise_std
+        # to produce sine waveforms
+        self.l_sin_gen = SineGen(sampling_rate, upsample_scale, harmonic_num,
+                                 sine_amp, add_noise_std, voiced_threshod)
+        # to merge source harmonics into a single excitation
+        self.l_linear = nn.Linear(harmonic_num + 1, 1)
+
+    def __call__(self, x):
+        """
+        Sine_source, noise_source = SourceModuleHnNSF(F0_sampled)
+        F0_sampled (batchsize, length, 1)
+        Sine_source (batchsize, length, 1)
+        noise_source (batchsize, length 1)
+        """
+        # source for harmonic branch
+        sine_wavs, uv, _ = self.l_sin_gen(x)
+        sine_merge = mx.tanh(self.l_linear(sine_wavs))
+        # source for noise branch, in the same shape as uv
+        noise = mx.random.normal(uv.shape) * self.sine_amp / 3
+        return sine_merge, noise, uv
+
+class ReflectionPad1d(nn.Module):
+    def __init__(self, padding):
+        super().__init__()
+        self.padding = padding
+
+    def __call__(self, x):
+        return mx.pad(x, ((0, 0), (0, 0), (self.padding[0], self.padding[1])))
+
+def leaky_relu(x, negative_slope=0.1):
+    return mx.maximum(x, x * negative_slope)
+
+class Generator(nn.Module):
+    def __init__(self, style_dim, resblock_kernel_sizes, upsample_rates, upsample_initial_channel, resblock_dilation_sizes, upsample_kernel_sizes, gen_istft_n_fft, gen_istft_hop_size):
+        super(Generator, self).__init__()
+        self.num_kernels = len(resblock_kernel_sizes)
+        self.num_upsamples = len(upsample_rates)
+        upsample_rates = mx.array(upsample_rates)
+        self.m_source = SourceModuleHnNSF(
+                    sampling_rate=24000,
+                    upsample_scale=mx.prod(upsample_rates) * gen_istft_hop_size,
+                    harmonic_num=8, voiced_threshod=10)
+        self.f0_upsamp = nn.Upsample(scale_factor=mx.prod(upsample_rates) * gen_istft_hop_size)
+        self.noise_convs = []
+        self.noise_res = []
+        self.ups = []
+        for i, (u, k) in enumerate(zip(upsample_rates, upsample_kernel_sizes)):
+            self.ups.append(nn.ConvTranspose1d(upsample_initial_channel//(2**i), upsample_initial_channel//(2**(i+1)),
+                                   k, u, padding=(k-u)//2))
+        self.resblocks = []
+        for i in range(len(self.ups)):
+            ch = upsample_initial_channel//(2**(i+1))
+            for j, (k, d) in enumerate(zip(resblock_kernel_sizes,resblock_dilation_sizes)):
+                self.resblocks.append(AdaINResBlock1(ch, k, d, style_dim))
+            c_cur = upsample_initial_channel // (2 ** (i + 1))
+            if i + 1 < len(upsample_rates):
+                stride_f0 = mx.prod(upsample_rates[i + 1:])
+                self.noise_convs.append(nn.Conv1d(
+                    gen_istft_n_fft + 2, c_cur, kernel_size=stride_f0 * 2, stride=stride_f0, padding=(stride_f0+1) // 2))
+                self.noise_res.append(AdaINResBlock1(c_cur, 7, [1,3,5], style_dim))
+            else:
+                self.noise_convs.append(nn.Conv1d(gen_istft_n_fft + 2, c_cur, kernel_size=1))
+                self.noise_res.append(AdaINResBlock1(c_cur, 11, [1,3,5], style_dim))
+        self.post_n_fft = gen_istft_n_fft
+        self.conv_post = nn.Conv1d(ch, self.post_n_fft + 2, 7, 1, padding=3)
+        self.reflection_pad = ReflectionPad1d((1, 0))
+        self.stft = MLXSTFT(filter_length=gen_istft_n_fft, hop_length=gen_istft_hop_size, win_length=gen_istft_n_fft)
+
+    def __call__(self, x, s, f0):
+        f0 = self.f0_upsamp(f0[:, None].transpose(0, 2, 1))  # bs,n,t
+        har_source, noi_source, uv = self.m_source(f0)
+        har_source = mx.squeeze(har_source.transpose(0, 2, 1), axis=1)
+        har_spec, har_phase = self.stft.transform(har_source)
+        har = mx.concatenate([har_spec, har_phase], axis=1)
+        for i in range(self.num_upsamples):
+            x = leaky_relu(x, negative_slope=0.1)
+            x_source = self.noise_convs[i](har.transpose(0, 2, 1))
+            if isinstance(self.noise_res[i], nn.Conv1d):
+                x_source = self.noise_res[i](x_source, s)
+            else:
+                x_source = self.noise_res[i](x_source.transpose(0, 2, 1), s)
+
+
+            x = mx.transpose(x, (0, 2, 1))
+            x = self.ups[i](x)
+            x = mx.transpose(x, (0, 2, 1))
+            if i == self.num_upsamples - 1:
+                x = self.reflection_pad(x)
+            x = x + x_source
+
+            xs = None
+            for j in range(self.num_kernels):
+                if xs is None:
+                    xs = self.resblocks[i*self.num_kernels+j](x, s)
+                else:
+                    xs += self.resblocks[i*self.num_kernels+j](x, s)
+            x = xs / self.num_kernels
+
+        x = leaky_relu(x)
+        x = mx.transpose(x, (0, 2, 1))
+        x = self.conv_post(x)
+        x = mx.transpose(x, (0, 2, 1))
+        spec = mx.exp(x[:,:self.post_n_fft // 2 + 1, :])
+        phase = mx.sin(x[:, self.post_n_fft // 2 + 1:, :])
+        start_time = time.time()
+        result = self.stft.inverse(spec, phase)
+        end_time = time.time()
+        return result
+
+
+class UpSample1d(nn.Module):
+    def __init__(self, layer_type):
+        super().__init__()
+        self.layer_type = layer_type
+        self.interpolate = nn.Upsample(scale_factor=2, mode='nearest', align_corners=True)
+
+    def __call__(self, x):
+        if self.layer_type == 'none':
+            return x
+        else:
+            return self.interpolate(x)
+
+
+
+class AdainResBlk1d(nn.Module):
+    def __init__(self, dim_in, dim_out, style_dim=64, actv=nn.LeakyReLU(0.2), upsample='none', dropout_p=0.0, bias=False):
+        super().__init__()
+        self.actv = actv
+        self.groups = dim_in
+        self.dim_in = dim_in
+        self.upsample_type = upsample
+        self.upsample = UpSample1d(upsample)
+        self.learned_sc = dim_in != dim_out
+        self._build_weights(dim_in, dim_out, style_dim)
+        self.dropout = nn.Dropout(dropout_p)
+        if upsample == 'none':
+            self.pool = nn.Identity()
+        else:
+            self.pool = nn.ConvTranspose1d(1, dim_in, kernel_size=3, stride=2, padding=1)
+
+
+    def _build_weights(self, dim_in, dim_out, style_dim):
+        self.conv1 = nn.Conv1d(dim_in, dim_out, 3, 1, 1)
+        self.conv2 = nn.Conv1d(dim_out, dim_out, 3, 1, 1)
+        self.norm1 = AdaIN1d(style_dim, dim_in)
+        self.norm2 = AdaIN1d(style_dim, dim_out)
+        if self.learned_sc:
+            self.conv1x1 = nn.Conv1d(dim_in, dim_out, 1, 1, 0, bias=False)
+
+    def _shortcut(self, x):
+        B, C, L = x.shape
+        x = x.transpose(0, 2, 1)
+
+        x = self.upsample(x)
+        # Remove the last element from x to match the shape of x_
+        # TODO: Fix this
+        if x.shape[1] > L:
+            x = x[:, :-1, :]
+
+        if self.learned_sc:
+            x = self.conv1x1(x)
+        x = x.transpose(0, 2, 1)
+        return x
+
+    def _residual(self, x, s):
+        x = self.norm1(x, s)
+        x = self.actv(x)
+
+        # Manually implement grouped ConvTranspose1d since MLX doesn't support groups
+        B, C, L = x.shape
+        if self.upsample_type == 'none':
+            x = self.pool(x)  # [B*C, 1, L*2]
+        else:
+            x = x.transpose(1, 2, 0)
+            # TODO: Replace with official MLX implementation
+            x = self.pool(x)
+            x = x[:, :, :1]
+            x = mx.transpose(x, (2, 0, 1))
+
+        x = mx.transpose(x, (0, 2, 1))
+        x = self.conv1(self.dropout(x))
+        x = mx.transpose(x, (0, 2, 1))
+        x = self.norm2(x, s)
+        x = self.actv(x)
+        x = mx.transpose(x, (0, 2, 1))
+        x = self.conv2(self.dropout(x))
+        x = mx.transpose(x, (0, 2, 1))
+        return x
+
+    def __call__(self, x, s):
+        out = self._residual(x, s)
+        out = (out + self._shortcut(x)) / np.sqrt(2)
+        return out
+
+
+class Decoder(nn.Module):
+    def __init__(self, dim_in, style_dim, dim_out,
+                 resblock_kernel_sizes,
+                 upsample_rates,
+                 upsample_initial_channel,
+                 resblock_dilation_sizes,
+                 upsample_kernel_sizes,
+                 gen_istft_n_fft, gen_istft_hop_size):
+        super().__init__()
+        self.encode = AdainResBlk1d(dim_in + 2, 1024, style_dim)
+        self.decode = []
+        self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim))
+        self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim))
+        self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim))
+        self.decode.append(AdainResBlk1d(1024 + 2 + 64, 512, style_dim, upsample=True))
+        self.F0_conv = nn.Conv1d(1, 1, kernel_size=3, stride=2, groups=1, padding=1)
+        self.N_conv = nn.Conv1d(1, 1, kernel_size=3, stride=2, groups=1, padding=1)
+        self.asr_res = nn.Sequential(nn.Conv1d(512, 64, kernel_size=1))
+        self.generator = Generator(style_dim, resblock_kernel_sizes, upsample_rates,
+                                   upsample_initial_channel, resblock_dilation_sizes,
+                                   upsample_kernel_sizes, gen_istft_n_fft, gen_istft_hop_size)
+
+    def __call__(self, asr, F0_curve, N, s):
+        s = mx.array(s)
+        F0 = self.F0_conv(F0_curve[:, None, :].transpose(0, 2, 1))
+        F0 = F0.transpose(0, 2, 1)
+        N = self.N_conv(N[:, None, :].transpose(0, 2, 1))
+        N = N.transpose(0, 2, 1)
+        x = mx.concatenate([asr, F0, N], axis=1)
+        x = self.encode(x, s)
+        asr = asr.transpose(0, 2, 1)
+        asr_res = self.asr_res(asr)
+        asr_res = asr_res.transpose(0, 2, 1)
+        res = True
+        for block in self.decode:
+            if res:
+                x = mx.concatenate([x, asr_res, F0, N], axis=1)
+            x = block(x, s)
+            if block.upsample_type != "none":
+                res = False
+        x = self.generator(x, s, F0_curve)
+        return x
