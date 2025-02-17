@@ -20,7 +20,7 @@ class TextEncoder(nn.Module):
         padding = (kernel_size - 1) // 2
         self.cnn = []
         for _ in range(depth):
-            self.cnn.extend([
+            self.cnn.append([
                 nn.Conv1d(channels, channels, kernel_size=kernel_size, padding=padding),
                 nn.LayerNorm(channels),
                 nn.ReLU() if actv is None else actv,
@@ -36,10 +36,11 @@ class TextEncoder(nn.Module):
         x = mx.where(m, 0.0, x)
 
         for conv in self.cnn:
-            x = mx.transpose(x, (0, 2, 1))
-            x = conv(x)
-            x = mx.transpose(x, (0, 2, 1))
-            x = mx.where(m, 0.0, x)
+            for layer in conv:
+                x = mx.transpose(x, (0, 2, 1))
+                x = layer(x)
+                x = mx.transpose(x, (0, 2, 1))
+                x = mx.where(m, 0.0, x)
 
         x = mx.transpose(x, (0, 2, 1))
         x = self.lstm(x)

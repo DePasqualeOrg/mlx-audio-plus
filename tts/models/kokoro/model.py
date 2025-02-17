@@ -28,6 +28,66 @@ def check_array_shape(arr):
     else:
         return False
 
+def sanitize_state_dict(state_dict: dict) -> dict:
+    # Process LSTM weight/bias keys
+    processed_dict = {}
+    for k, v in state_dict.items():
+        # Replace weight_v and weight_g with weight
+        if k.endswith(('.weight_v', '.weight_g')):
+            base_key = k.rsplit('.', 1)[0]
+            new_key = f"{base_key}.weight"
+            # Handle conv weights
+            if "pool" in new_key or "conv" in new_key or "cnn" in new_key :
+                if check_array_shape(v):
+                    processed_dict[new_key] = v
+                else:
+                    logger.debug(f"Transposing {k} with shape {v.shape}")
+                    processed_dict[new_key] = v.transpose(0, 2, 1)
+            else:
+                processed_dict[new_key] = v
+
+        elif k.endswith(('.gamma', '.beta')):
+            base_key = k.rsplit('.', 1)[0]
+            if k.endswith(".gamma"):
+                new_key = f"{base_key}.weight"
+            else:
+                new_key = f"{base_key}.bias"
+            processed_dict[new_key] = v
+
+        elif "F0_proj.weight" in k or "N_proj.weight" in k:
+            processed_dict[k] = v.transpose(0, 2, 1)
+            print(f"Transposing {k} with shape {v.shape} transposed shape {processed_dict[k].shape}")
+
+        # Replace weight_ih_l0_reverse and weight_hh_l0_reverse with Wx and Wh
+        elif k.endswith('.weight_ih_l0_reverse'):
+            base_key = k.rsplit('.', 1)[0]
+            new_key = f"{base_key}.backward_lstm.Wx"
+            processed_dict[new_key] = v
+        elif k.endswith('.weight_hh_l0_reverse'):
+            base_key = k.rsplit('.', 1)[0]
+            new_key = f"{base_key}.backward_lstm.Wh"
+            processed_dict[new_key] = v
+        elif k.endswith(('.bias_ih_l0_reverse', '.bias_hh_l0_reverse')):
+            base_key = k.rsplit('.', 1)[0]
+            new_key = f"{base_key}.backward_lstm.bias"
+            processed_dict[new_key] = v
+        elif k.endswith('.weight_ih_l0'):
+            base_key = k.rsplit('.', 1)[0]
+            new_key = f"{base_key}.forward_lstm.Wx"
+            processed_dict[new_key] = v
+        elif k.endswith('.weight_hh_l0'):
+            base_key = k.rsplit('.', 1)[0]
+            new_key = f"{base_key}.forward_lstm.Wh"
+            processed_dict[new_key] = v
+        elif k.endswith(('.bias_ih_l0', '.bias_hh_l0')):
+            base_key = k.rsplit('.', 1)[0]
+            new_key = f"{base_key}.forward_lstm.bias"
+            processed_dict[new_key] = v
+        else:
+            processed_dict[k] = v
+
+    return processed_dict
+
 class KModel(nn.Module):
     '''
     KModel is a torch.nn.Module with 2 main responsibilities:
@@ -94,6 +154,19 @@ class KModel(nn.Module):
                     'bias': mx.array(state_dict["module.bias"])
                 }
                 getattr(self, key).load_weights(list(state_dict.items()))
+
+            if key == "text_encoder":
+                logger.debug(f"Loading {key} from state_dict")
+                logger.debug(getattr(self, key).parameters().keys())
+                logger.debug(state_dict.keys())
+                mlx_state_dict = {
+                    k.replace('module.', ''): mx.array(v)
+                    for k, v in state_dict.items()
+                }
+                mlx_state_dict = sanitize_state_dict(mlx_state_dict)
+                logger.debug(f"MLX state dict: {mlx_state_dict.keys()}")
+                getattr(self, key).load_weights(list(mlx_state_dict.items()))
+
             if key == "predictor":
                 logger.debug(f"Loading {key} from state_dict")
                 logger.debug(getattr(self, key).parameters().keys())
@@ -105,56 +178,8 @@ class KModel(nn.Module):
                     for k, v in state_dict.items()
                 }
 
-                # Process LSTM weight/bias keys
-                processed_dict = {}
-                for k, v in mlx_state_dict.items():
-                    # Replace weight_v and weight_g with weight
-                    if k.endswith(('.weight_v', '.weight_g')):
-                        base_key = k.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.weight"
-                        # Handle conv weights
-                        if "pool" in new_key or "conv" in new_key:
-                            if check_array_shape(v):
-                                processed_dict[new_key] = v
-                            else:
-                                processed_dict[new_key] = v.transpose(0, 2, 1)
-                        else:
-                            processed_dict[new_key] = v
 
-                    elif "F0_proj.weight" in k or "N_proj.weight" in k:
-                        processed_dict[k] = v.transpose(0, 2, 1)
-                        print(f"Transposing {k} with shape {v.shape} transposed shape {processed_dict[k].shape}")
-
-                    # Replace weight_ih_l0_reverse and weight_hh_l0_reverse with Wx and Wh
-                    elif k.endswith('.weight_ih_l0_reverse'):
-                        base_key = k.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.backward_lstm.Wx"
-                        processed_dict[new_key] = v
-                    elif k.endswith('.weight_hh_l0_reverse'):
-                        base_key = k.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.backward_lstm.Wh"
-                        processed_dict[new_key] = v
-                    elif k.endswith(('.bias_ih_l0_reverse', '.bias_hh_l0_reverse')):
-                        base_key = k.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.backward_lstm.bias"
-                        processed_dict[new_key] = v
-                    elif k.endswith('.weight_ih_l0'):
-                        base_key = k.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.forward_lstm.Wx"
-                        processed_dict[new_key] = v
-                    elif k.endswith('.weight_hh_l0'):
-                        base_key = k.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.forward_lstm.Wh"
-                        processed_dict[new_key] = v
-                    elif k.endswith(('.bias_ih_l0', '.bias_hh_l0')):
-                        base_key = k.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.forward_lstm.bias"
-                        processed_dict[new_key] = v
-                    else:
-                        processed_dict[k] = v
-
-                mlx_state_dict = processed_dict
-
+                mlx_state_dict = sanitize_state_dict(mlx_state_dict)
 
                 logger.debug(f"MLX state dict: {mlx_state_dict.keys()}")
                 getattr(self, key).load_weights(list(mlx_state_dict.items()))
@@ -186,11 +211,16 @@ class KModel(nn.Module):
         ref_s = ref_s
         s = ref_s[:, 128:]
         d = self.predictor.text_encoder(d_en, s, input_lengths, text_mask)
+        print("d.shape", d.shape)
         x = self.predictor.lstm(d)
+        print("x.shape", x.shape)
         duration = self.predictor.duration_proj(x)
+        print("duration.shape", duration.shape)
         duration = mx.sigmoid(duration).sum(axis=-1) / speed
         pred_dur = mx.clip(mx.round(duration), a_min=1, a_max=None).astype(mx.int32)[0]
+        print("pred_dur.shape", pred_dur.shape)
         logger.debug(f"pred_dur: {pred_dur}")
+        print("pred_dur.shape", pred_dur.shape)
         indices = mx.concatenate([mx.repeat(mx.array(i), int(n)) for i, n in enumerate(pred_dur)])
         pred_aln_trg = mx.zeros((input_ids.shape[1], indices.shape[0]))
         pred_aln_trg[indices, mx.arange(indices.shape[0])] = 1
