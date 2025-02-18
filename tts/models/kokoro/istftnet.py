@@ -10,28 +10,26 @@ from ..interpolate import interpolate
 def get_padding(kernel_size: int, dilation: int = 1) -> int:
     return int((kernel_size * dilation - dilation) / 2)
 
-class WeightNorm:
-    """MLX implementation of weight normalization"""
-    def __init__(self, weight: mx.array, dim: int):
-        self.dim = dim
-        self.g = mx.sqrt(mx.sum(weight * weight, axis=dim, keepdims=True))
-        self.v = weight
 
-    def __call__(self) -> mx.array:
-        return self.g * self.v / mx.sqrt(mx.sum(self.v * self.v, axis=self.dim, keepdims=True))
-
-class Conv1d(nn.Module):
+class ConvWeighted(nn.Module):
     """Conv1d with weight normalization"""
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int,
-                 stride: int = 1, padding: int = 0, dilation: int = 1, groups: int = 1):
+                 stride: int = 1, padding: int = 0, dilation: int = 1, groups: int = 1, bias: bool = True):
         super().__init__()
-        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size,
-                            stride=stride, padding=padding, dilation=dilation, groups=groups)
-        self.weight_norm = WeightNorm(self.conv.weight, dim=0)
+        self.weight_g = mx.random.normal((out_channels, in_channels, kernel_size))
+        self.weight_v = mx.random.normal((out_channels, in_channels, kernel_size))
+        self.stride = stride
+        self.padding = padding
+        self.dilation = dilation
+        self.groups = groups
+        self.bias = mx.random.normal((out_channels,)) if bias else None
 
-    def __call__(self, x):
-        self.conv.weight = self.weight_norm()
-        return self.conv(x)
+    def __call__(self, x, conv):
+        weight = self.weight_g * self.weight_v / mx.sqrt(mx.sum(self.weight_v * self.weight_v, axis=0, keepdims=True))
+        if self.bias is not None:
+            return conv(x, weight, stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups) + self.bias.reshape(1, -1, 1)
+        else:
+            return conv(x, weight, stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups)
 
 class AdaIN1d(nn.Module):
     def __init__(self, style_dim: int, num_features: int):
@@ -55,13 +53,13 @@ class AdaINResBlock1(nn.Module):
                  dilation: Tuple[int, int, int] = (1, 3, 5), style_dim: int = 64):
         super().__init__()
         self.convs1 = [
-            Conv1d(channels, channels, kernel_size, 1,
+            ConvWeighted(channels, channels, kernel_size, 1,
                   padding=get_padding(kernel_size, dilation[i]),
                   dilation=dilation[i])
             for i in range(3)
         ]
         self.convs2 = [
-            Conv1d(channels, channels, kernel_size, 1,
+            ConvWeighted(channels, channels, kernel_size, 1,
                   padding=get_padding(kernel_size, 1),
                   dilation=1)
             for _ in range(3)
@@ -78,12 +76,12 @@ class AdaINResBlock1(nn.Module):
             xt = n1(x, s)
             xt = xt + (1 / a1) * (mx.sin(a1 * xt) ** 2)  # Snake1D
             xt = mx.transpose(xt, (0, 2, 1))
-            xt = c1(xt)
+            xt = c1(xt, mx.conv1d)
             xt = mx.transpose(xt, (0, 2, 1))
             xt = n2(xt, s)
             xt = xt + (1 / a2) * (mx.sin(a2 * xt) ** 2)  # Snake1D
             xt = mx.transpose(xt, (0, 2, 1))
-            xt = c2(xt)
+            xt = c2(xt, mx.conv1d)
             xt = mx.transpose(xt, (0, 2, 1))
             x = xt + x
         return x
@@ -173,7 +171,7 @@ class MLXSTFT:
         reconstruction = self.inverse(self.magnitude, self.phase)
         return mx.expand_dims(reconstruction, axis=-2)
 
-class SineGen(nn.Module):
+class SineGen():
     def __init__(self, samp_rate: int, upsample_scale: int, harmonic_num: int = 0,
                  sine_amp: float = 0.1, noise_std: float = 0.003,
                  voiced_threshold: float = 0, flag_for_pulse: bool = False):
@@ -323,8 +321,8 @@ class Generator(nn.Module):
         self.noise_res = []
         self.ups = []
         for i, (u, k) in enumerate(zip(upsample_rates, upsample_kernel_sizes)):
-            self.ups.append(nn.ConvTranspose1d(upsample_initial_channel//(2**i), upsample_initial_channel//(2**(i+1)),
-                                   k, u, padding=(k-u)//2))
+            self.ups.append(ConvWeighted(upsample_initial_channel//(2**i), upsample_initial_channel//(2**(i+1)),
+                                   k, int(u), padding=int((k-u)//2)))
         self.resblocks = []
         for i in range(len(self.ups)):
             ch = upsample_initial_channel//(2**(i+1))
@@ -332,7 +330,7 @@ class Generator(nn.Module):
                 self.resblocks.append(AdaINResBlock1(ch, k, d, style_dim))
             c_cur = upsample_initial_channel // (2 ** (i + 1))
             if i + 1 < len(upsample_rates):
-                stride_f0 = mx.prod(upsample_rates[i + 1:])
+                stride_f0 = int(mx.prod(upsample_rates[i + 1:]))
                 self.noise_convs.append(nn.Conv1d(
                     gen_istft_n_fft + 2, c_cur, kernel_size=stride_f0 * 2, stride=stride_f0, padding=(stride_f0+1) // 2))
                 self.noise_res.append(AdaINResBlock1(c_cur, 7, [1,3,5], style_dim))
@@ -340,7 +338,7 @@ class Generator(nn.Module):
                 self.noise_convs.append(nn.Conv1d(gen_istft_n_fft + 2, c_cur, kernel_size=1))
                 self.noise_res.append(AdaINResBlock1(c_cur, 11, [1,3,5], style_dim))
         self.post_n_fft = gen_istft_n_fft
-        self.conv_post = nn.Conv1d(ch, self.post_n_fft + 2, 7, 1, padding=3)
+        self.conv_post = ConvWeighted(ch, self.post_n_fft + 2, 7, 1, padding=3)
         self.reflection_pad = ReflectionPad1d((1, 0))
         self.stft = MLXSTFT(filter_length=gen_istft_n_fft, hop_length=gen_istft_hop_size, win_length=gen_istft_n_fft)
 
@@ -360,7 +358,7 @@ class Generator(nn.Module):
 
 
             x = mx.transpose(x, (0, 2, 1))
-            x = self.ups[i](x)
+            x = self.ups[i](x, mx.conv_transpose1d)
             x = mx.transpose(x, (0, 2, 1))
             if i == self.num_upsamples - 1:
                 x = self.reflection_pad(x)
@@ -376,7 +374,7 @@ class Generator(nn.Module):
 
         x = leaky_relu(x)
         x = mx.transpose(x, (0, 2, 1))
-        x = self.conv_post(x)
+        x = self.conv_post(x, mx.conv1d)
         x = mx.transpose(x, (0, 2, 1))
         spec = mx.exp(x[:,:self.post_n_fft // 2 + 1, :])
         phase = mx.sin(x[:, self.post_n_fft // 2 + 1:, :])
@@ -401,29 +399,30 @@ class UpSample1d(nn.Module):
 
 
 class AdainResBlk1d(nn.Module):
-    def __init__(self, dim_in, dim_out, style_dim=64, actv=nn.LeakyReLU(0.2), upsample='none', dropout_p=0.0, bias=False):
+    def __init__(self, dim_in, dim_out, style_dim=64, actv=nn.LeakyReLU(0.2), upsample='none', dropout_p=0.0, bias=False, conv_type=None):
         super().__init__()
         self.actv = actv
         self.groups = dim_in
         self.dim_in = dim_in
+        self.conv_type = conv_type
         self.upsample_type = upsample
         self.upsample = UpSample1d(upsample)
         self.learned_sc = dim_in != dim_out
-        self._build_weights(dim_in, dim_out, style_dim)
+        self._build_weights(dim_in, dim_out, style_dim, bias)
         self.dropout = nn.Dropout(dropout_p)
         if upsample == 'none':
             self.pool = nn.Identity()
         else:
-            self.pool = nn.ConvTranspose1d(1, dim_in, kernel_size=3, stride=2, padding=1)
+            self.pool = nn.ConvTranspose1d(1, dim_in, kernel_size=3, stride=2, padding=1) if self.conv_type is None else ConvWeighted(1, dim_in, 3, 2, 1, 1, groups=dim_in)
 
 
-    def _build_weights(self, dim_in, dim_out, style_dim):
-        self.conv1 = nn.Conv1d(dim_in, dim_out, 3, 1, 1)
-        self.conv2 = nn.Conv1d(dim_out, dim_out, 3, 1, 1)
+    def _build_weights(self, dim_in, dim_out, style_dim, bias: bool = False):
+        self.conv1 = nn.Conv1d(dim_in, dim_out, 3, 1, 1) if self.conv_type is None else ConvWeighted(dim_in, dim_out, 3, 1, 1)
+        self.conv2 = nn.Conv1d(dim_out, dim_out, 3, 1, 1) if self.conv_type is None else ConvWeighted(dim_out, dim_out, 3, 1, 1)
         self.norm1 = AdaIN1d(style_dim, dim_in)
         self.norm2 = AdaIN1d(style_dim, dim_out)
         if self.learned_sc:
-            self.conv1x1 = nn.Conv1d(dim_in, dim_out, 1, 1, 0, bias=False)
+            self.conv1x1 = nn.Conv1d(dim_in, dim_out, 1, 1, 0, bias=False) if self.conv_type is None else ConvWeighted(dim_in, dim_out, 1, 1, 0, bias=bias)
 
     def _shortcut(self, x):
         B, C, L = x.shape
@@ -436,7 +435,7 @@ class AdainResBlk1d(nn.Module):
             x = x[:, :-1, :]
 
         if self.learned_sc:
-            x = self.conv1x1(x)
+            x = self.conv1x1(x) if self.conv_type is None else self.conv1x1(x, self.conv_type)
         x = x.transpose(0, 2, 1)
         return x
 
@@ -451,17 +450,17 @@ class AdainResBlk1d(nn.Module):
         else:
             x = x.transpose(1, 2, 0)
             # TODO: Replace with official MLX implementation
-            x = self.pool(x)
+            x = self.pool(x) if self.conv_type is None else self.pool(x, mx.conv_transpose1d)
             x = x[:, :, :1]
             x = mx.transpose(x, (2, 0, 1))
 
         x = mx.transpose(x, (0, 2, 1))
-        x = self.conv1(self.dropout(x))
+        x = self.conv1(self.dropout(x)) if self.conv_type is None else self.conv1(self.dropout(x), self.conv_type)
         x = mx.transpose(x, (0, 2, 1))
         x = self.norm2(x, s)
         x = self.actv(x)
         x = mx.transpose(x, (0, 2, 1))
-        x = self.conv2(self.dropout(x))
+        x = self.conv2(self.dropout(x)) if self.conv_type is None else self.conv2(self.dropout(x), self.conv_type)
         x = mx.transpose(x, (0, 2, 1))
         return x
 
@@ -480,29 +479,29 @@ class Decoder(nn.Module):
                  upsample_kernel_sizes,
                  gen_istft_n_fft, gen_istft_hop_size):
         super().__init__()
-        self.encode = AdainResBlk1d(dim_in + 2, 1024, style_dim)
+        self.encode = AdainResBlk1d(dim_in + 2, 1024, style_dim, conv_type=mx.conv1d)
         self.decode = []
-        self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim))
-        self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim))
-        self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim))
-        self.decode.append(AdainResBlk1d(1024 + 2 + 64, 512, style_dim, upsample=True))
-        self.F0_conv = nn.Conv1d(1, 1, kernel_size=3, stride=2, groups=1, padding=1)
-        self.N_conv = nn.Conv1d(1, 1, kernel_size=3, stride=2, groups=1, padding=1)
-        self.asr_res = nn.Sequential(nn.Conv1d(512, 64, kernel_size=1))
+        self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim, conv_type=mx.conv1d))
+        self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim, conv_type=mx.conv1d))
+        self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim, conv_type=mx.conv1d))
+        self.decode.append(AdainResBlk1d(1024 + 2 + 64, 512, style_dim, upsample=True, conv_type=mx.conv1d))
+        self.F0_conv = ConvWeighted(1, 1, 3, 2, 1, 1, groups=1)
+        self.N_conv = ConvWeighted(1, 1, 3, 2, 1, 1, groups=1)
+        self.asr_res = [ConvWeighted(512, 64, kernel_size=1)]
         self.generator = Generator(style_dim, resblock_kernel_sizes, upsample_rates,
                                    upsample_initial_channel, resblock_dilation_sizes,
                                    upsample_kernel_sizes, gen_istft_n_fft, gen_istft_hop_size)
 
     def __call__(self, asr, F0_curve, N, s):
         s = mx.array(s)
-        F0 = self.F0_conv(F0_curve[:, None, :].transpose(0, 2, 1))
+        F0 = self.F0_conv(F0_curve[:, None, :].transpose(0, 2, 1), mx.conv1d)
         F0 = F0.transpose(0, 2, 1)
-        N = self.N_conv(N[:, None, :].transpose(0, 2, 1))
+        N = self.N_conv(N[:, None, :].transpose(0, 2, 1), mx.conv1d)
         N = N.transpose(0, 2, 1)
         x = mx.concatenate([asr, F0, N], axis=1)
         x = self.encode(x, s)
         asr = asr.transpose(0, 2, 1)
-        asr_res = self.asr_res(asr)
+        asr_res = self.asr_res[0](asr, mx.conv1d)
         asr_res = asr_res.transpose(0, 2, 1)
         res = True
         for block in self.decode:

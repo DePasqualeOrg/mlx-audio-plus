@@ -102,7 +102,7 @@ class ProsodyPredictor(nn.Module):
 
         self.N = [
             AdainResBlk1d(d_hid, d_hid, style_dim, dropout_p=dropout),
-            AdainResBlk1d(d_hid, d_hid // 2, style_dim, upsample=True, dropout_p=dropout, bias=True),
+            AdainResBlk1d(d_hid, d_hid // 2, style_dim, upsample=True, dropout_p=dropout),
             AdainResBlk1d(d_hid // 2, d_hid // 2, style_dim, dropout_p=dropout)
         ]
 

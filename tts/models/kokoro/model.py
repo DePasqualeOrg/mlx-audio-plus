@@ -37,14 +37,27 @@ def sanitize_state_dict(state_dict: dict) -> dict:
             base_key = k.rsplit('.', 1)[0]
             new_key = f"{base_key}.weight"
             # Handle conv weights
-            if "pool" in new_key or "conv" in new_key or "cnn" in new_key :
+            if (
+                "pool" in new_key or "conv" in new_key
+                or "cnn" in new_key or "asr_res" in new_key
+                or "resblocks" in new_key or "ups" in new_key
+            ):
+                if "ups" in new_key:
+                    logger.debug(f"new_key: {new_key} {v.shape}")
                 if check_array_shape(v):
                     processed_dict[new_key] = v
                 else:
-                    logger.debug(f"Transposing {k} with shape {v.shape}")
-                    processed_dict[new_key] = v.transpose(0, 2, 1)
+                    if "ups" in new_key:
+                        processed_dict[new_key] = v.transpose(1, 2, 0)
+                    else:
+                        processed_dict[new_key] = v.transpose(0, 2, 1)
             else:
                 processed_dict[new_key] = v
+
+
+
+        elif "noise_convs" in k and k.endswith(".weight"):
+            processed_dict[k] = v.transpose(0, 2, 1)
 
         elif k.endswith(('.gamma', '.beta')):
             base_key = k.rsplit('.', 1)[0]
@@ -56,7 +69,6 @@ def sanitize_state_dict(state_dict: dict) -> dict:
 
         elif "F0_proj.weight" in k or "N_proj.weight" in k:
             processed_dict[k] = v.transpose(0, 2, 1)
-            print(f"Transposing {k} with shape {v.shape} transposed shape {processed_dict[k].shape}")
 
         # Replace weight_ih_l0_reverse and weight_hh_l0_reverse with Wx and Wh
         elif k.endswith('.weight_ih_l0_reverse'):
@@ -154,6 +166,8 @@ class KModel(nn.Module):
                     'bias': mx.array(state_dict["module.bias"])
                 }
                 getattr(self, key).load_weights(list(state_dict.items()))
+                mx.eval(getattr(self, key).parameters())
+                getattr(self, key).eval()
 
             if key == "text_encoder":
                 logger.debug(f"Loading {key} from state_dict")
@@ -166,6 +180,8 @@ class KModel(nn.Module):
                 mlx_state_dict = sanitize_state_dict(mlx_state_dict)
                 logger.debug(f"MLX state dict: {mlx_state_dict.keys()}")
                 getattr(self, key).load_weights(list(mlx_state_dict.items()))
+                mx.eval(getattr(self, key).parameters())
+                getattr(self, key).eval()
 
             if key == "predictor":
                 logger.debug(f"Loading {key} from state_dict")
@@ -183,6 +199,26 @@ class KModel(nn.Module):
 
                 logger.debug(f"MLX state dict: {mlx_state_dict.keys()}")
                 getattr(self, key).load_weights(list(mlx_state_dict.items()))
+                mx.eval(getattr(self, key).parameters())
+                getattr(self, key).eval()
+
+            if key == "decoder":
+                logger.debug(f"Loading {key} from state_dict")
+                logger.debug(f"MLX model keys: {getattr(self, key).generator.resblocks[0].convs1[0].parameters().keys()}")
+                logger.debug(f"State dict keys: {state_dict.keys()}")
+
+                mlx_state_dict = {
+                    k.replace('module.', ''): mx.array(v)
+                    for k, v in state_dict.items()
+                }
+
+                # mlx_state_dict = sanitize_state_dict(mlx_state_dict)
+
+                logger.debug(f"MLX state dict: {mlx_state_dict.keys()}")
+                getattr(self, key).load_weights(list(mlx_state_dict.items()))
+                mx.eval(getattr(self, key).parameters())
+                getattr(self, key).eval()
+
 
     @dataclass
     class Output:
@@ -219,7 +255,7 @@ class KModel(nn.Module):
         duration = mx.sigmoid(duration).sum(axis=-1) / speed
         pred_dur = mx.clip(mx.round(duration), a_min=1, a_max=None).astype(mx.int32)[0]
         print("pred_dur.shape", pred_dur.shape)
-        logger.debug(f"pred_dur: {pred_dur}")
+        logger.debug(f"pred_dur: {pred_dur.tolist()}")
         print("pred_dur.shape", pred_dur.shape)
         indices = mx.concatenate([mx.repeat(mx.array(i), int(n)) for i, n in enumerate(pred_dur)])
         pred_aln_trg = mx.zeros((input_ids.shape[1], indices.shape[0]))
