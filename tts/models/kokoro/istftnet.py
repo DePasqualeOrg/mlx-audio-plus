@@ -90,7 +90,7 @@ def weight_norm(weight_v: mx.array,
 class ConvWeighted(nn.Module):
     """Conv1d with weight normalization"""
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int,
-                 stride: int = 1, padding: int = 1, dilation: int = 1, groups: int = 1, bias: bool = True, transpose_g: bool = False, encode: bool = False):
+                 stride: int = 1, padding: int = 1, dilation: int = 1, groups: int = 1, bias: bool = True, encode: bool = False):
         super().__init__()
 
         self.stride = stride
@@ -98,23 +98,18 @@ class ConvWeighted(nn.Module):
         self.dilation = dilation
         self.groups = groups
 
-        self.transpose_g = transpose_g
+        # Initialize weight magnitude (g) and direction (v) vectors
+        weight_g = mx.ones((out_channels, 1, 1))  # Scalar magnitude per output channel
+        weight_v = mx.ones((out_channels, kernel_size, in_channels))  # Direction vectors
 
-         # Initialize weight and direction vectors
-        weight_shape_g = (out_channels, 1, 1)
-        weight_shape_v = (out_channels, kernel_size, in_channels)
-        weight_g = mx.ones(shape=weight_shape_g)
-        weight_v = mx.ones(shape=weight_shape_v)
         # Store parameters
         self.weight_g = mx.array(weight_g)
         self.weight_v = mx.array(weight_v)
-        if encode:
-            self.bias = mx.zeros(in_channels)
-        else:
-            self.bias = mx.zeros(out_channels) if bias else None
+
+        self.bias = mx.zeros(in_channels if encode else out_channels) if bias else None
 
 
-    def __call__(self, x, conv, transpose_weight: bool = False, transpose_shape: Tuple[int, int, int] = None):
+    def __call__(self, x, conv):
 
         weight = weight_norm(self.weight_v, self.weight_g, dim=0)
 
