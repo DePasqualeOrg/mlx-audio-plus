@@ -142,10 +142,161 @@ class ConvWeighted(nn.Module):
                 print(f"x.shape: {x.shape}, weight.shape: {weight.shape}")
                 raise e
 
+class _InstanceNorm(nn.Module):
+    def __init__(
+        self,
+        num_features: int,
+        eps: float = 1e-5,
+        momentum: float = 0.1,
+        affine: bool = False,
+        track_running_stats: bool = False,
+    ) -> None:
+        super().__init__()
+        self.num_features = num_features
+        self.eps = eps
+        self.momentum = momentum
+        self.affine = affine
+        self.track_running_stats = track_running_stats
+
+        # Initialize parameters
+        if self.affine:
+            self.weight = mx.ones((num_features,))
+            self.bias = mx.zeros((num_features,))
+        else:
+            self.weight = None
+            self.bias = None
+
+        if self.track_running_stats:
+            self.running_mean = mx.zeros((num_features,))
+            self.running_var = mx.ones((num_features,))
+        else:
+            self.running_mean = None
+            self.running_var = None
+
+    def _check_input_dim(self, input):
+        raise NotImplementedError
+
+    def _get_no_batch_dim(self):
+        raise NotImplementedError
+
+    def _handle_no_batch_input(self, input):
+        # Add batch dimension, apply norm, then remove batch dimension
+        expanded = mx.expand_dims(input, axis=0)
+        result = self._apply_instance_norm(expanded)
+        return mx.squeeze(result, axis=0)
+
+    def _apply_instance_norm(self, input):
+        # MLX doesn't have a direct instance_norm function like PyTorch
+        # So we need to implement it manually
+
+        # Get dimensions
+        dims = list(range(input.ndim))
+        feature_dim = dims[-self._get_no_batch_dim()]
+
+        # Compute statistics along all dims except batch and feature dims
+        reduce_dims = [d for d in dims if d != 0 and d != feature_dim]
+
+        if self.training or not self.track_running_stats:
+            # Compute mean and variance for normalization
+            mean = mx.mean(input, axis=reduce_dims, keepdims=True)
+            var = mx.var(input, axis=reduce_dims, keepdims=True)
+
+            # Update running stats if tracking
+            if self.track_running_stats and self.training:
+                # Compute overall mean and variance (across batch too)
+                overall_mean = mx.mean(mean, axis=0)
+                overall_var = mx.mean(var, axis=0)
+
+                # Update running statistics
+                self.running_mean = (1 - self.momentum) * self.running_mean + self.momentum * overall_mean
+                self.running_var = (1 - self.momentum) * self.running_var + self.momentum * overall_var
+        else:
+            # Use running statistics
+            mean_shape = [1] * input.ndim
+            mean_shape[feature_dim] = self.num_features
+            var_shape = mean_shape.copy()
+
+            mean = mx.reshape(self.running_mean, mean_shape)
+            var = mx.reshape(self.running_var, var_shape)
+
+        # Normalize
+        x_norm = (input - mean) / mx.sqrt(var + self.eps)
+
+        # Apply affine transform if needed
+        if self.affine:
+            weight_shape = [1] * input.ndim
+            weight_shape[feature_dim] = self.num_features
+            bias_shape = weight_shape.copy()
+
+            weight = mx.reshape(self.weight, weight_shape)
+            bias = mx.reshape(self.bias, bias_shape)
+
+            return x_norm * weight + bias
+        else:
+            return x_norm
+
+    def __call__(self, input):
+        self._check_input_dim(input)
+
+        feature_dim = input.ndim - self._get_no_batch_dim()
+        if input.shape[feature_dim] != self.num_features:
+            if self.affine:
+                raise ValueError(
+                    f"expected input's size at dim={feature_dim} to match num_features"
+                    f" ({self.num_features}), but got: {input.shape[feature_dim]}."
+                )
+            else:
+                warnings.warn(
+                    f"input's size at dim={feature_dim} does not match num_features. "
+                    "You can silence this warning by not passing in num_features, "
+                    "which is not used because affine=False"
+                )
+
+        if input.ndim == self._get_no_batch_dim():
+            return self._handle_no_batch_input(input)
+
+        return self._apply_instance_norm(input)
+
+
+class InstanceNorm1d(_InstanceNorm):
+    """Applies Instance Normalization over a 2D (unbatched) or 3D (batched) input.
+
+    This implementation follows the algorithm described in the paper
+    "Instance Normalization: The Missing Ingredient for Fast Stylization".
+
+    Args:
+        num_features: Number of features or channels (C) of the input
+        eps: A value added to the denominator for numerical stability. Default: 1e-5
+        momentum: The value used for the running_mean and running_var computation. Default: 0.1
+        affine: When True, this module has learnable affine parameters. Default: False
+        track_running_stats: When True, this module tracks running statistics. Default: False
+
+    Shape:
+        - Input: (N, C, L) or (C, L)
+        - Output: Same shape as input
+
+    Examples:
+        >>> # Without Learnable Parameters
+        >>> m = nn.InstanceNorm1d(100)
+        >>> # With Learnable Parameters
+        >>> m = nn.InstanceNorm1d(100, affine=True)
+        >>> input = mx.random.normal((20, 100, 40))
+        >>> output = m(input)
+    """
+
+    def _get_no_batch_dim(self):
+        return 2
+
+    def _check_input_dim(self, input):
+        if input.ndim not in (2, 3):
+            raise ValueError(f"expected 2D or 3D input (got {input.ndim}D input)")
+
+
 class AdaIN1d(nn.Module):
     def __init__(self, style_dim: int, num_features: int):
         super().__init__()
-        self.norm = nn.InstanceNorm(num_features, affine=False)
+        self.norm = InstanceNorm1d(num_features, affine=False)
+        # self.norm = nn.Identity()
         self.fc = nn.Linear(style_dim, num_features * 2)
 
     def __call__(self, x: mx.array, s: mx.array) -> mx.array:
@@ -158,15 +309,15 @@ class AdaIN1d(nn.Module):
 class AdaINResBlock1(nn.Module):
     def __init__(self, channels: int, kernel_size: int = 3,
                  dilation: Tuple[int, int, int] = (1, 3, 5), style_dim: int = 64):
-        super().__init__()
+        super(AdaINResBlock1, self).__init__()
         self.convs1 = [
-            ConvWeighted(channels, channels, kernel_size, 1,
+            ConvWeighted(channels, channels, kernel_size,stride=1,
                   padding=get_padding(kernel_size, dilation[i]),
                   dilation=dilation[i])
             for i in range(3)
         ]
         self.convs2 = [
-            ConvWeighted(channels, channels, kernel_size, 1,
+            ConvWeighted(channels, channels, kernel_size,stride= 1,
                   padding=get_padding(kernel_size, 1),
                   dilation=1)
             for _ in range(3)
@@ -553,14 +704,11 @@ class AdainResBlk1d(nn.Module):
         x = self.actv(x)
 
         # Manually implement grouped ConvTranspose1d since MLX doesn't support groups
-        if self.upsample_type == 'none':
-            x = self.pool(x)  # [B*C, 1, L*2]
-        else:
-            x = x.swapaxes(2, 1)
-            # TODO: Replace with official MLX implementation
-            x = self.pool(x, mx.conv_transpose1d)
-            x = mx.pad(x, ((0, 0), (1, 0), (0, 0)))
-            x = x.swapaxes(2, 1)
+        x = x.swapaxes(2, 1)
+        # TODO: Replace with official MLX implementation
+        x = self.pool(x, mx.conv_transpose1d) if self.upsample_type != 'none' else x
+        x = mx.pad(x, ((0, 0), (1, 0), (0, 0))) if self.upsample_type != 'none' else x
+        x = x.swapaxes(2, 1)
 
         x = x.swapaxes(2, 1)
         x = self.conv1(self.dropout(x), mx.conv1d)
@@ -575,7 +723,6 @@ class AdainResBlk1d(nn.Module):
         return x
 
     def __call__(self, x, s):
-        print("x.shape before residual", x.shape , "s.shape", s.shape)
         out = self._residual(x, s)
         out = (out + self._shortcut(x)) / np.sqrt(2)
         return out
@@ -611,12 +758,12 @@ class Decoder(nn.Module):
         x = self.encode(x, s)
         asr_res = self.asr_res[0](asr.swapaxes(2, 1), mx.conv1d).swapaxes(2, 1)
         res = True
-        # for block in self.decode: # Not working in MLX
-        #     if res:
-        #         x = mx.concatenate([x, asr_res, F0, N], axis=1)
-        #     x = block(x, s)
-        #     # Check if this block has upsampling
-        #     if hasattr(block, 'upsample_type') and block.upsample_type != "none":
-        #         res = False
-        # x = self.generator(x, s, F0_curve) # Not working in MLX
-        return x, s, F0_curve, asr_res, F0, N
+        for block in self.decode: # Working in MLX
+            if res:
+                x = mx.concatenate([x, asr_res, F0, N], axis=1)
+            x = block(x, s)
+            # Check if this block has upsampling
+            if hasattr(block, 'upsample_type') and block.upsample_type != "none":
+                res = False
+        x = self.generator(x, s, F0_curve) # Working in MLX
+        return x

@@ -377,28 +377,28 @@ class KModel(nn.Module):
         asr = mx.array(asr)
         F0_pred = mx.array(F0_pred)
         N_pred = mx.array(N_pred)
-        # audio = self.decoder(asr, F0_pred, N_pred, ref_s[:, :128])[0] #.cpu().detach().numpy() # Not working in MLX
-        audio = self.decoder(asr, F0_pred, N_pred, ref_s[:, :128])
-        x = torch.from_dlpack(audio[0])
-        s = torch.from_dlpack(audio[1])
-        F0_curve = torch.from_dlpack(audio[2])
-        asr_res = torch.from_dlpack(audio[3])
-        F0 = torch.from_dlpack(audio[4])
-        N = torch.from_dlpack(audio[5])
-        res = True
-        for i, (block, decoder_block) in enumerate(zip(decoder.decode, self.decoder.decode)):
-            if res:
-                x = torch.concatenate([x, asr_res, F0, N], axis=1)
-            if i in [3]:
-                x = block(x, s)
-            else:
-                x = mx.array(x)
-                x = decoder_block(x, mx.array(s))
-                x = torch.from_dlpack(x)
+        audio = self.decoder(asr, F0_pred, N_pred, ref_s[:, :128])[0] #.cpu().detach().numpy() # Working fine in MLX
+        # audio = self.decoder(asr, F0_pred, N_pred, ref_s[:, :128])
+        # x = torch.from_dlpack(audio[0])
+        # s = torch.from_dlpack(audio[1])
+        # F0_curve = torch.from_dlpack(audio[2])
+        # asr_res = torch.from_dlpack(audio[3])
+        # F0 = torch.from_dlpack(audio[4])
+        # N = torch.from_dlpack(audio[5])
+        # res = True
+        # for i, (block, decoder_block) in enumerate(zip(decoder.decode, self.decoder.decode)):
+        #     if res:
+        #         x = torch.concatenate([x, asr_res, F0, N], axis=1)
+        #     # if i in [3]:
+        #     #     x = block(x, s)
+        #     # else:
+        #         x = mx.array(x)
+        #         x = decoder_block(x, mx.array(s))
+        #         x = torch.from_dlpack(x)
 
-            if hasattr(decoder_block, 'upsample_type') and decoder_block.upsample_type != "none":
-                res = False
-        audio = decoder.generator(x, s, F0_curve)[0].cpu().detach().numpy()
+        #     if hasattr(decoder_block, 'upsample_type') and decoder_block.upsample_type != "none":
+        #         res = False
+        # audio = decoder.generator(x, s, F0_curve)[0].cpu().detach().numpy()
 
 
         logger.info(f"audio.shape: {audio.shape}")
