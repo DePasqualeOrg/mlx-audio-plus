@@ -360,45 +360,25 @@ class KModel(nn.Module):
         # Predictor Not working in MLX
         d = self.predictor.text_encoder(d_en, s, input_lengths, text_mask)
         x, _= self.predictor.lstm(d)
+        d = mx.array(d)
         duration = self.predictor.duration_proj(x)
-        duration = torch.sigmoid(duration).sum(axis=-1) / speed
-        pred_dur = torch.round(duration).clamp(min=1).long().squeeze()
-        indices = torch.repeat_interleave(torch.arange(input_ids.shape[1]), pred_dur)
-        pred_aln_trg = torch.zeros((input_ids.shape[1], indices.shape[0]))
-        pred_aln_trg[indices, torch.arange(indices.shape[0])] = 1
+        duration = mx.sigmoid(duration).sum(axis=-1) / speed
+        pred_dur = mx.clip(mx.round(duration), a_min=1, a_max=None).astype(mx.int32)[0]
+        indices = mx.concatenate([mx.repeat(mx.array(i), int(n)) for i, n in enumerate(pred_dur)])
+        pred_aln_trg = mx.zeros((input_ids.shape[1], indices.shape[0]))
+        pred_aln_trg[indices, mx.arange(indices.shape[0])] = 1
         pred_aln_trg = pred_aln_trg[None, :]
-        en = d.transpose(-1, -2) @ pred_aln_trg
+        en = d.transpose(0, 2, 1) @ pred_aln_trg
+        en = torch.from_dlpack(en)
         F0_pred, N_pred = self.predictor.F0Ntrain(en, s)
         text_mask = mx.array(text_mask)
         t_en = self.text_encoder(input_ids, input_lengths, text_mask) # Working fine in MLX
-        t_en = torch.from_dlpack(t_en)
         asr = t_en @ pred_aln_trg
 
         asr = mx.array(asr)
         F0_pred = mx.array(F0_pred)
         N_pred = mx.array(N_pred)
-        audio = self.decoder(asr, F0_pred, N_pred, ref_s[:, :128])[0] #.cpu().detach().numpy() # Working fine in MLX
-        # audio = self.decoder(asr, F0_pred, N_pred, ref_s[:, :128])
-        # x = torch.from_dlpack(audio[0])
-        # s = torch.from_dlpack(audio[1])
-        # F0_curve = torch.from_dlpack(audio[2])
-        # asr_res = torch.from_dlpack(audio[3])
-        # F0 = torch.from_dlpack(audio[4])
-        # N = torch.from_dlpack(audio[5])
-        # res = True
-        # for i, (block, decoder_block) in enumerate(zip(decoder.decode, self.decoder.decode)):
-        #     if res:
-        #         x = torch.concatenate([x, asr_res, F0, N], axis=1)
-        #     # if i in [3]:
-        #     #     x = block(x, s)
-        #     # else:
-        #         x = mx.array(x)
-        #         x = decoder_block(x, mx.array(s))
-        #         x = torch.from_dlpack(x)
-
-        #     if hasattr(decoder_block, 'upsample_type') and decoder_block.upsample_type != "none":
-        #         res = False
-        # audio = decoder.generator(x, s, F0_curve)[0].cpu().detach().numpy()
+        audio = self.decoder(asr, F0_pred, N_pred, ref_s[:, :128])[0] # Working fine in MLX
 
 
         logger.info(f"audio.shape: {audio.shape}")
