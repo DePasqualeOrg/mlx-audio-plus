@@ -66,7 +66,6 @@ class KPipeline:
         lang_code: str,
         model: Union[KModel, bool] = True,
         trf: bool = False,
-        device: Optional[str] = None
     ):
         """Initialize a KPipeline.
 
@@ -211,9 +210,10 @@ class KPipeline:
         model: KModel,
         ps: str,
         pack: torch.FloatTensor,
-        speed: Number = 1
+        speed: Number = 1,
+        decoder=None
     ) -> KModel.Output:
-        return model(ps, pack[len(ps)-1], speed, return_output=True)
+        return model(ps, pack[len(ps)-1], speed, return_output=True, decoder=decoder)
 
     def generate_from_tokens(
         self,
@@ -337,7 +337,8 @@ class KPipeline:
         voice: Optional[str] = None,
         speed: Number = 1,
         split_pattern: Optional[str] = r'\n+',
-        model: Optional[KModel] = None
+        model: Optional[KModel] = None,
+        decoder=None
     ) -> Generator['KPipeline.Result', None, None]:
         model = model or self.model
         if model and voice is None:
@@ -356,7 +357,7 @@ class KPipeline:
                     elif len(ps) > 510:
                         logger.warning(f"Unexpected len(ps) == {len(ps)} > 510 and ps == '{ps}'")
                         ps = ps[:510]
-                    output = KPipeline.infer(model, ps, pack, speed) if model else None
+                    output = KPipeline.infer(model, ps, pack, speed, decoder=decoder) if model else None
                     logger.info(f"output: {output}")
                     if output is not None and output.pred_dur is not None:
                         KPipeline.join_timestamps(tks, output.pred_dur)
@@ -370,5 +371,5 @@ class KPipeline:
                 elif len(ps) > 510:
                     logger.warning(f'Truncating len(ps) == {len(ps)} > 510')
                     ps = ps[:510]
-                output = KPipeline.infer(model, ps, pack, speed) if model else None
+                output = KPipeline.infer(model, ps, pack, speed, decoder=decoder) if model else None
                 yield self.Result(graphemes=graphemes, phonemes=ps, output=output)

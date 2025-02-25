@@ -1,3 +1,5 @@
+from typing import Optional, List, Union, Tuple
+
 import mlx.core as mx
 import mlx.nn as nn
 import librosa
@@ -11,25 +13,134 @@ def get_padding(kernel_size: int, dilation: int = 1) -> int:
     return int((kernel_size * dilation - dilation) / 2)
 
 
+def compute_norm(x: mx.array,
+                p: int,
+                dim: Optional[Union[int, List[int]]] = None,
+                keepdim: bool = False) -> mx.array:
+    """
+    Compute the p-norm of a tensor along specified dimensions.
+
+    Args:
+        x: Input array
+        p: Order of the norm (1 or 2)
+        dim: Dimension(s) along which to compute the norm
+        keepdim: Whether to keep the reduced dimensions
+
+    Returns:
+        MLX array containing the computed norm
+    """
+    if p not in [1, 2]:
+        raise ValueError("Only p-norms with p of 1 or 2 are supported")
+
+    # Handle dimension input
+    if dim is None:
+        dim = tuple(range(x.ndim))
+    elif isinstance(dim, int):
+        dim = (dim,)
+
+    if p == 1:
+        # L1 norm
+        return mx.sum(mx.abs(x), axis=dim, keepdims=keepdim)
+    else:
+        # L2 norm
+        return mx.sqrt(mx.sum(x * x, axis=dim, keepdims=keepdim))
+
+def weight_norm(weight_v: mx.array,
+                weight_g: mx.array,
+                dim: Optional[int] = None) -> mx.array:
+    """
+    Applies weight normalization to the input tensor.
+
+    Weight normalization reparameterizes weight vectors in a neural network
+    as a magnitude scalar times a direction vector: w = g * v/||v||
+
+    Args:
+        weight_v: Weight direction tensor (v)
+        weight_g: Weight magnitude tensor (g)
+        dim: Dimension along which to normalize. If None, normalize over all dims
+            except dim=-1
+
+    Returns:
+        Normalized weight tensor
+    """
+    rank = len(weight_v.shape)
+
+    if dim is not None:
+        # Adjust negative dim
+        if dim < -1:
+            dim += rank
+
+        # Create list of axes to normalize over
+        axes = list(range(rank))
+        if dim != -1:
+            axes.remove(dim)
+    else:
+        # Default behavior: normalize over all dimensions
+        axes = list(range(rank))
+
+    # Compute L2 norm of v along specified axes
+    norm_v = compute_norm(weight_v, p=2, dim=axes, keepdim=True)
+
+    # Normalize and scale by g: w = g * (v / ||v||)
+    normalized_weight = weight_v / (norm_v + 1e-7)  # Add epsilon for numerical stability
+    return normalized_weight * weight_g
+
+
+
 class ConvWeighted(nn.Module):
     """Conv1d with weight normalization"""
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int,
-                 stride: int = 1, padding: int = 0, dilation: int = 1, groups: int = 1, bias: bool = True):
+                 stride: int = 1, padding: int = 1, dilation: int = 1, groups: int = 1, bias: bool = True, transpose_g: bool = False, encode: bool = False):
         super().__init__()
-        self.weight_g = mx.random.normal((out_channels, in_channels, kernel_size))
-        self.weight_v = mx.random.normal((out_channels, in_channels, kernel_size))
+
         self.stride = stride
         self.padding = padding
         self.dilation = dilation
         self.groups = groups
-        self.bias = mx.random.normal((out_channels,)) if bias else None
 
-    def __call__(self, x, conv):
-        weight = self.weight_g * self.weight_v / mx.sqrt(mx.sum(self.weight_v * self.weight_v, axis=0, keepdims=True))
-        if self.bias is not None:
-            return conv(x, weight, stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups) + self.bias.reshape(1, -1, 1)
+        self.transpose_g = transpose_g
+
+         # Initialize weight and direction vectors
+        weight_shape_g = (out_channels, 1, 1)
+        weight_shape_v = (out_channels, kernel_size, in_channels)
+        weight_g = mx.ones(shape=weight_shape_g)
+        weight_v = mx.ones(shape=weight_shape_v)
+        # Store parameters
+        self.weight_g = mx.array(weight_g)
+        self.weight_v = mx.array(weight_v)
+        if encode:
+            self.bias = mx.zeros(in_channels)
         else:
-            return conv(x, weight, stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups)
+            self.bias = mx.zeros(out_channels) if bias else None
+
+
+    def __call__(self, x, conv, transpose_weight: bool = False, transpose_shape: Tuple[int, int, int] = None):
+
+        weight = weight_norm(self.weight_v, self.weight_g, dim=0)
+
+        if self.bias is not None:
+            bias = self.bias.reshape(1, 1, -1)
+        else:
+            bias = None
+        try:
+            if self.bias is not None:
+                return conv(x, weight, stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups) + bias
+            else:
+                return conv(x, weight, stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups)
+
+        except Exception as e:
+            print(f"Error: {e}")
+            print(f"x.shape: {x.shape}, weight.shape: {weight.shape}")
+            print(f"transpose_weight: {transpose_weight}")
+            try:
+                if self.bias is not None:
+                    return conv(x, weight.T, stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups) + bias
+                else:
+                    return conv(x, weight.T, stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups)
+            except Exception as e:
+                print(f"Error: {e}")
+                print(f"x.shape: {x.shape}, weight.shape: {weight.shape}")
+                raise e
 
 class AdaIN1d(nn.Module):
     def __init__(self, style_dim: int, num_features: int):
@@ -41,11 +152,7 @@ class AdaIN1d(nn.Module):
         h = self.fc(s)
         h = mx.expand_dims(h, axis=2)  # Equivalent to view(..., 1)
         gamma, beta = mx.split(h, 2, axis=1)
-        if x.shape[1] == gamma.shape[1]:
-            x = (1 + gamma) * self.norm(x) + beta
-        else:
-            x = (1 + gamma) * self.norm(x.transpose(0, 2, 1)) + beta
-            x = x.transpose(0, 2, 1)
+        x = (1 + gamma) * self.norm(x) + beta
         return x
 
 class AdaINResBlock1(nn.Module):
@@ -75,14 +182,18 @@ class AdaINResBlock1(nn.Module):
                                          self.alpha1, self.alpha2):
             xt = n1(x, s)
             xt = xt + (1 / a1) * (mx.sin(a1 * xt) ** 2)  # Snake1D
-            xt = mx.transpose(xt, (0, 2, 1))
+
+            xt = xt.swapaxes(2, 1)
             xt = c1(xt, mx.conv1d)
-            xt = mx.transpose(xt, (0, 2, 1))
+            xt = xt.swapaxes(2, 1)
+
             xt = n2(xt, s)
             xt = xt + (1 / a2) * (mx.sin(a2 * xt) ** 2)  # Snake1D
-            xt = mx.transpose(xt, (0, 2, 1))
+
+            xt = xt.swapaxes(2, 1)
             xt = c2(xt, mx.conv1d)
-            xt = mx.transpose(xt, (0, 2, 1))
+            xt = xt.swapaxes(2, 1)
+
             x = xt + x
         return x
 
@@ -170,6 +281,7 @@ class MLXSTFT:
         self.magnitude, self.phase = self.transform(input_data)
         reconstruction = self.inverse(self.magnitude, self.phase)
         return mx.expand_dims(reconstruction, axis=-2)
+
 
 class SineGen():
     def __init__(self, samp_rate: int, upsample_scale: int, harmonic_num: int = 0,
@@ -303,8 +415,8 @@ class ReflectionPad1d(nn.Module):
     def __call__(self, x):
         return mx.pad(x, ((0, 0), (0, 0), (self.padding[0], self.padding[1])))
 
-def leaky_relu(x, negative_slope=0.1):
-    return mx.maximum(x, x * negative_slope)
+def leaky_relu(x, negative_slope=0.01):
+    return mx.where(x > 0, x, x * negative_slope)
 
 class Generator(nn.Module):
     def __init__(self, style_dim, resblock_kernel_sizes, upsample_rates, upsample_initial_channel, resblock_dilation_sizes, upsample_kernel_sizes, gen_istft_n_fft, gen_istft_hop_size):
@@ -321,11 +433,11 @@ class Generator(nn.Module):
         self.noise_res = []
         self.ups = []
         for i, (u, k) in enumerate(zip(upsample_rates, upsample_kernel_sizes)):
-            self.ups.append(ConvWeighted(upsample_initial_channel//(2**i), upsample_initial_channel//(2**(i+1)),
-                                   k, int(u), padding=int((k-u)//2)))
+            self.ups.append(ConvWeighted(upsample_initial_channel//(2**(i+1)), upsample_initial_channel//(2**i),
+                                   int(k), int(u), padding=int((k-u)//2), encode=True))
         self.resblocks = []
         for i in range(len(self.ups)):
-            ch = upsample_initial_channel//(2**(i+1))
+            ch = upsample_initial_channel//(2 **( i+1))
             for j, (k, d) in enumerate(zip(resblock_kernel_sizes,resblock_dilation_sizes)):
                 self.resblocks.append(AdaINResBlock1(ch, k, d, style_dim))
             c_cur = upsample_initial_channel // (2 ** (i + 1))
@@ -348,21 +460,23 @@ class Generator(nn.Module):
         har_source = mx.squeeze(har_source.transpose(0, 2, 1), axis=1)
         har_spec, har_phase = self.stft.transform(har_source)
         har = mx.concatenate([har_spec, har_phase], axis=1)
+        har = har.swapaxes(2, 1)
         for i in range(self.num_upsamples):
             x = leaky_relu(x, negative_slope=0.1)
-            x_source = self.noise_convs[i](har.transpose(0, 2, 1))
-            if isinstance(self.noise_res[i], nn.Conv1d):
-                x_source = self.noise_res[i](x_source, s)
-            else:
-                x_source = self.noise_res[i](x_source.transpose(0, 2, 1), s)
+            x_source = self.noise_convs[i](har)
+            x_source = x_source.swapaxes(2, 1)
+            x_source = self.noise_res[i](x_source, s)
 
 
-            x = mx.transpose(x, (0, 2, 1))
+            x = x.swapaxes(2, 1)
             x = self.ups[i](x, mx.conv_transpose1d)
-            x = mx.transpose(x, (0, 2, 1))
+            x = x.swapaxes(2, 1)
+
+
             if i == self.num_upsamples - 1:
                 x = self.reflection_pad(x)
             x = x + x_source
+
 
             xs = None
             for j in range(self.num_kernels):
@@ -372,15 +486,15 @@ class Generator(nn.Module):
                     xs += self.resblocks[i*self.num_kernels+j](x, s)
             x = xs / self.num_kernels
 
-        x = leaky_relu(x)
-        x = mx.transpose(x, (0, 2, 1))
+        x = leaky_relu(x, negative_slope=0.01)
+
+        x = x.swapaxes(2, 1)
         x = self.conv_post(x, mx.conv1d)
-        x = mx.transpose(x, (0, 2, 1))
+        x = x.swapaxes(2, 1)
+
         spec = mx.exp(x[:,:self.post_n_fft // 2 + 1, :])
         phase = mx.sin(x[:, self.post_n_fft // 2 + 1:, :])
-        start_time = time.time()
         result = self.stft.inverse(spec, phase)
-        end_time = time.time()
         return result
 
 
@@ -402,7 +516,6 @@ class AdainResBlk1d(nn.Module):
     def __init__(self, dim_in, dim_out, style_dim=64, actv=nn.LeakyReLU(0.2), upsample='none', dropout_p=0.0, bias=False, conv_type=None):
         super().__init__()
         self.actv = actv
-        self.groups = dim_in
         self.dim_in = dim_in
         self.conv_type = conv_type
         self.upsample_type = upsample
@@ -413,30 +526,26 @@ class AdainResBlk1d(nn.Module):
         if upsample == 'none':
             self.pool = nn.Identity()
         else:
-            self.pool = nn.ConvTranspose1d(1, dim_in, kernel_size=3, stride=2, padding=1) if self.conv_type is None else ConvWeighted(1, dim_in, 3, 2, 1, 1, groups=dim_in)
+            self.pool = ConvWeighted(1, dim_in, kernel_size=3, stride=2, padding=1, groups=dim_in)
 
 
     def _build_weights(self, dim_in, dim_out, style_dim, bias: bool = False):
-        self.conv1 = nn.Conv1d(dim_in, dim_out, 3, 1, 1) if self.conv_type is None else ConvWeighted(dim_in, dim_out, 3, 1, 1)
-        self.conv2 = nn.Conv1d(dim_out, dim_out, 3, 1, 1) if self.conv_type is None else ConvWeighted(dim_out, dim_out, 3, 1, 1)
+        self.conv1 = ConvWeighted(dim_in, dim_out, kernel_size=3, stride=1, padding=1)
+        self.conv2 = ConvWeighted(dim_out, dim_out, kernel_size=3, stride=1, padding=1)
         self.norm1 = AdaIN1d(style_dim, dim_in)
         self.norm2 = AdaIN1d(style_dim, dim_out)
         if self.learned_sc:
-            self.conv1x1 = nn.Conv1d(dim_in, dim_out, 1, 1, 0, bias=False) if self.conv_type is None else ConvWeighted(dim_in, dim_out, 1, 1, 0, bias=bias)
+            self.conv1x1 = ConvWeighted(dim_in, dim_out, kernel_size=1, stride=1, padding=0, bias=False)
 
     def _shortcut(self, x):
-        B, C, L = x.shape
-        x = x.transpose(0, 2, 1)
-
+        x = x.swapaxes(2, 1)
         x = self.upsample(x)
-        # Remove the last element from x to match the shape of x_
-        # TODO: Fix this
-        if x.shape[1] > L:
-            x = x[:, :-1, :]
+        x = x.swapaxes(2, 1)
 
         if self.learned_sc:
-            x = self.conv1x1(x) if self.conv_type is None else self.conv1x1(x, self.conv_type)
-        x = x.transpose(0, 2, 1)
+            x = x.swapaxes(2, 1)
+            x = self.conv1x1(x, mx.conv1d)
+            x = x.swapaxes(2, 1)
         return x
 
     def _residual(self, x, s):
@@ -444,27 +553,29 @@ class AdainResBlk1d(nn.Module):
         x = self.actv(x)
 
         # Manually implement grouped ConvTranspose1d since MLX doesn't support groups
-        B, C, L = x.shape
         if self.upsample_type == 'none':
             x = self.pool(x)  # [B*C, 1, L*2]
         else:
-            x = x.transpose(1, 2, 0)
+            x = x.swapaxes(2, 1)
             # TODO: Replace with official MLX implementation
-            x = self.pool(x) if self.conv_type is None else self.pool(x, mx.conv_transpose1d)
-            x = x[:, :, :1]
-            x = mx.transpose(x, (2, 0, 1))
+            x = self.pool(x, mx.conv_transpose1d)
+            x = mx.pad(x, ((0, 0), (1, 0), (0, 0)))
+            x = x.swapaxes(2, 1)
 
-        x = mx.transpose(x, (0, 2, 1))
-        x = self.conv1(self.dropout(x)) if self.conv_type is None else self.conv1(self.dropout(x), self.conv_type)
-        x = mx.transpose(x, (0, 2, 1))
+        x = x.swapaxes(2, 1)
+        x = self.conv1(self.dropout(x), mx.conv1d)
+        x = x.swapaxes(2, 1)
+
         x = self.norm2(x, s)
         x = self.actv(x)
-        x = mx.transpose(x, (0, 2, 1))
-        x = self.conv2(self.dropout(x)) if self.conv_type is None else self.conv2(self.dropout(x), self.conv_type)
-        x = mx.transpose(x, (0, 2, 1))
+
+        x = x.swapaxes(2, 1)
+        x = self.conv2(x, mx.conv1d)
+        x = x.swapaxes(2, 1)
         return x
 
     def __call__(self, x, s):
+        print("x.shape before residual", x.shape , "s.shape", s.shape)
         out = self._residual(x, s)
         out = (out + self._shortcut(x)) / np.sqrt(2)
         return out
@@ -485,30 +596,27 @@ class Decoder(nn.Module):
         self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim, conv_type=mx.conv1d))
         self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim, conv_type=mx.conv1d))
         self.decode.append(AdainResBlk1d(1024 + 2 + 64, 512, style_dim, upsample=True, conv_type=mx.conv1d))
-        self.F0_conv = ConvWeighted(1, 1, 3, 2, 1, 1, groups=1)
-        self.N_conv = ConvWeighted(1, 1, 3, 2, 1, 1, groups=1)
-        self.asr_res = [ConvWeighted(512, 64, kernel_size=1)]
+        self.F0_conv = ConvWeighted(1, 1, kernel_size=3, stride=2, padding=1, groups=1)
+        self.N_conv = ConvWeighted(1, 1, kernel_size=3, stride=2, padding=1, groups=1)
+        self.asr_res = [ConvWeighted(512, 64, kernel_size=1, padding=0)]
         self.generator = Generator(style_dim, resblock_kernel_sizes, upsample_rates,
                                    upsample_initial_channel, resblock_dilation_sizes,
                                    upsample_kernel_sizes, gen_istft_n_fft, gen_istft_hop_size)
 
     def __call__(self, asr, F0_curve, N, s):
         s = mx.array(s)
-        F0 = self.F0_conv(F0_curve[:, None, :].transpose(0, 2, 1), mx.conv1d)
-        F0 = F0.transpose(0, 2, 1)
-        N = self.N_conv(N[:, None, :].transpose(0, 2, 1), mx.conv1d)
-        N = N.transpose(0, 2, 1)
+        F0 = self.F0_conv(F0_curve[:, None, :].swapaxes(2, 1), mx.conv1d).swapaxes(2, 1)
+        N = self.N_conv(N[:, None, :].swapaxes(2, 1), mx.conv1d).swapaxes(2, 1)
         x = mx.concatenate([asr, F0, N], axis=1)
         x = self.encode(x, s)
-        asr = asr.transpose(0, 2, 1)
-        asr_res = self.asr_res[0](asr, mx.conv1d)
-        asr_res = asr_res.transpose(0, 2, 1)
+        asr_res = self.asr_res[0](asr.swapaxes(2, 1), mx.conv1d).swapaxes(2, 1)
         res = True
-        for block in self.decode:
-            if res:
-                x = mx.concatenate([x, asr_res, F0, N], axis=1)
-            x = block(x, s)
-            if block.upsample_type != "none":
-                res = False
-        x = self.generator(x, s, F0_curve)
-        return x
+        # for block in self.decode: # Not working in MLX
+        #     if res:
+        #         x = mx.concatenate([x, asr_res, F0, N], axis=1)
+        #     x = block(x, s)
+        #     # Check if this block has upsampling
+        #     if hasattr(block, 'upsample_type') and block.upsample_type != "none":
+        #         res = False
+        # x = self.generator(x, s, F0_curve) # Not working in MLX
+        return x, s, F0_curve, asr_res, F0, N

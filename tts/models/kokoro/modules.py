@@ -1,7 +1,7 @@
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
-from .istftnet import AdainResBlk1d
+from .istftnet import AdainResBlk1d, ConvWeighted
 from transformers import AlbertModel
 
 class LinearNorm(nn.Module):
@@ -9,21 +9,22 @@ class LinearNorm(nn.Module):
         super().__init__()
         self.linear_layer = nn.Linear(in_dim, out_dim, bias=bias)
 
+
     def __call__(self, x):
         return self.linear_layer(x)
 
 
 class TextEncoder(nn.Module):
-    def __init__(self, channels, kernel_size, depth, n_symbols, actv=None):
+    def __init__(self, channels, kernel_size, depth, n_symbols, actv=nn.LeakyReLU(0.2)):
         super().__init__()
         self.embedding = nn.Embedding(n_symbols, channels)
         padding = (kernel_size - 1) // 2
         self.cnn = []
         for _ in range(depth):
             self.cnn.append([
-                nn.Conv1d(channels, channels, kernel_size=kernel_size, padding=padding),
+                ConvWeighted(channels, channels, kernel_size=kernel_size, padding=padding),
                 nn.LayerNorm(channels),
-                nn.ReLU() if actv is None else actv,
+                actv,
                 nn.Dropout(0.2),
             ])
         # MLX doesn't have built-in LSTM, so we'll implement a simplified version
@@ -37,15 +38,21 @@ class TextEncoder(nn.Module):
 
         for conv in self.cnn:
             for layer in conv:
-                x = mx.transpose(x, (0, 2, 1))
-                x = layer(x)
-                x = mx.transpose(x, (0, 2, 1))
+                if isinstance(layer, ConvWeighted):
+                    x = x.swapaxes(2, 1)
+                    x = layer(x, mx.conv1d)
+                    x = x.swapaxes(2, 1)
+                else:
+                    x = layer(x)
+
                 x = mx.where(m, 0.0, x)
 
-        x = mx.transpose(x, (0, 2, 1))
+        x = x.swapaxes(2, 1)
         x = self.lstm(x)
-        x = mx.transpose(x, (0, 2, 1))
-        x = mx.where(m, 0.0, x)
+        x = x.swapaxes(2, 1)
+        x_pad = mx.zeros([x.shape[0], x.shape[1], m.shape[-1]])
+        x_pad[:, :, :x.shape[-1]] = x
+        x = mx.where(m, 0.0, x_pad)
         return x
 
 class AdaLayerNorm(nn.Module):
@@ -95,15 +102,15 @@ class ProsodyPredictor(nn.Module):
 
         # F0 and N blocks
         self.F0 = [
-            AdainResBlk1d(d_hid, d_hid, style_dim, dropout_p=dropout),
-            AdainResBlk1d(d_hid, d_hid // 2, style_dim, upsample=True, dropout_p=dropout),
-            AdainResBlk1d(d_hid // 2, d_hid // 2, style_dim, dropout_p=dropout)
+            AdainResBlk1d(d_hid, d_hid, style_dim, dropout_p=dropout, conv_type=mx.conv1d),
+            AdainResBlk1d(d_hid, d_hid // 2, style_dim, upsample=True, dropout_p=dropout, conv_type=mx.conv1d),
+            AdainResBlk1d(d_hid // 2, d_hid // 2, style_dim, dropout_p=dropout, conv_type=mx.conv1d)
         ]
 
         self.N = [
-            AdainResBlk1d(d_hid, d_hid, style_dim, dropout_p=dropout),
-            AdainResBlk1d(d_hid, d_hid // 2, style_dim, upsample=True, dropout_p=dropout),
-            AdainResBlk1d(d_hid // 2, d_hid // 2, style_dim, dropout_p=dropout)
+            AdainResBlk1d(d_hid, d_hid, style_dim, dropout_p=dropout, conv_type=mx.conv1d),
+            AdainResBlk1d(d_hid, d_hid // 2, style_dim, upsample=True, dropout_p=dropout, conv_type=mx.conv1d),
+            AdainResBlk1d(d_hid // 2, d_hid // 2, style_dim, dropout_p=dropout, conv_type=mx.conv1d)
         ]
 
         self.F0_proj = nn.Conv1d(d_hid // 2, 1, 1, padding=0)
@@ -114,7 +121,7 @@ class ProsodyPredictor(nn.Module):
         x = self.lstm(d, text_lengths)
 
         # Apply dropout during inference
-        x = mx.random.bernoulli(0.5, x.shape) * x
+        x = mx.dropout(x, p=0.5)
 
         duration = self.duration_proj(x)
         en = mx.matmul(mx.transpose(d), alignment)
@@ -128,19 +135,20 @@ class ProsodyPredictor(nn.Module):
         # F0 prediction
         F0 = mx.transpose(x, (0, 2, 1))
         for block in self.F0:
+            print(f"F0.shape: {F0.shape}")
             F0 = block(F0, s)
 
-        F0 = mx.transpose(F0, (0, 2, 1))
-        F0 = self.F0_proj(F0 )
-        F0 = mx.transpose(F0, (0, 2, 1))
+        F0 = F0.swapaxes(2, 1)
+        F0 = self.F0_proj(F0)
+        F0 = F0.swapaxes(2, 1)
 
         # N prediction
         N = mx.transpose(x, (0, 2, 1))
         for block in self.N:
             N = block(N, s)
-        N = mx.transpose(N, (0, 2, 1))
+        N = N.swapaxes(2, 1)
         N = self.N_proj(N)
-        N = mx.transpose(N, (0, 2, 1))
+        N = N.swapaxes(2, 1)
 
         return mx.squeeze(F0, axis=1), mx.squeeze(N, axis=1)
 
@@ -165,7 +173,7 @@ class DurationEncoder(nn.Module):
         style = mx.array(style)
         text_lengths = mx.array(text_lengths)
         m = mx.array(m)
-        x = x.transpose(2, 0, 1)
+        x = x.swapaxes(2, 0)
         s = mx.broadcast_to(style, (x.shape[0], x.shape[1], style.shape[-1]))
 
         x = mx.concatenate([x, s], axis=-1)

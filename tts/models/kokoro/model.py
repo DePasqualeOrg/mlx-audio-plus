@@ -1,5 +1,7 @@
 from .istftnet import Decoder
 from .modules import CustomAlbert, ProsodyPredictor, TextEncoder
+from kokoro.modules import ProsodyPredictor as TorchProsodyPredictor, TextEncoder as TorchTextEncoder
+from kokoro.istftnet import Decoder as TorchDecoder
 from dataclasses import dataclass
 from huggingface_hub import hf_hub_download
 from loguru import logger
@@ -17,10 +19,10 @@ def check_array_shape(arr):
     shape = arr.shape
 
     # Check if the shape has 4 dimensions
-    if len(shape) != 4:
+    if len(shape) != 3:
         return False
 
-    out_channels, kH, KW, _ = shape
+    out_channels, kH, KW = shape
 
     # Check if out_channels is the largest, and kH and KW are the same
     if (out_channels >= kH) and (out_channels >= KW) and (kH == KW):
@@ -131,7 +133,7 @@ class KModel(nn.Module):
         self.bert = CustomAlbert(AlbertConfig(vocab_size=config['n_token'], **config['plbert']))
         self.bert_encoder = nn.Linear(self.bert.config.hidden_size, config['hidden_dim'])
         self.context_length = self.bert.config.max_position_embeddings
-        self.predictor = ProsodyPredictor(
+        self.predictor = TorchProsodyPredictor(
             style_dim=config['style_dim'], d_hid=config['hidden_dim'],
             nlayers=config['n_layer'], max_dur=config['max_dur'], dropout=config['dropout']
         )
@@ -152,7 +154,8 @@ class KModel(nn.Module):
         logger.debug(model)
         for key, state_dict in state_dict.items():
             assert hasattr(self, key), key
-            if key == 'bert':
+
+            if key in ['bert', 'predictor']:
                 try:
                     getattr(self, key).load_state_dict(state_dict)
                 except:
@@ -161,11 +164,11 @@ class KModel(nn.Module):
                     getattr(self, key).load_state_dict(state_dict, strict=False)
             if key == "bert_encoder":
                 logger.debug(f"Loading {key} from state_dict")
-                state_dict = {
-                    'weight': mx.array(state_dict["module.weight"]),
-                    'bias': mx.array(state_dict["module.bias"])
+                mlx_state_dict = {
+                    k.replace('module.', ''): mx.array(v)
+                    for k, v in state_dict.items()
                 }
-                getattr(self, key).load_weights(list(state_dict.items()))
+                getattr(self, key).load_weights(list(mlx_state_dict.items()))
                 mx.eval(getattr(self, key).parameters())
                 getattr(self, key).eval()
 
@@ -177,30 +180,114 @@ class KModel(nn.Module):
                     k.replace('module.', ''): mx.array(v)
                     for k, v in state_dict.items()
                 }
-                mlx_state_dict = sanitize_state_dict(mlx_state_dict)
+                # mlx_state_dict = sanitize_state_dict(mlx_state_dict)
+                processed_mlx_state_dict = {}
+                for k, v in mlx_state_dict.items():
+                    if k.endswith(('.gamma', '.beta')):
+                        base_key = k.rsplit('.', 1)[0]
+                        if k.endswith(".gamma"):
+                            new_key = f"{base_key}.weight"
+                        else:
+                            new_key = f"{base_key}.bias"
+
+                        processed_mlx_state_dict[new_key] = v
+                    elif "weight_v" in k:
+                        if check_array_shape(v):
+                            processed_mlx_state_dict[k] = v
+                        else:
+                            processed_mlx_state_dict[k] = v.transpose(0, 2, 1)
+                    # elif "weight_g" in k:
+
+                    #     processed_mlx_state_dict[k] = v.transpose(1, 2, 0)
+
+                        # print(f"{k}: {processed_mlx_state_dict[k].shape}, {v.shape}")
+                    # Replace weight_ih_l0_reverse and weight_hh_l0_reverse with Wx and Wh
+                    elif k.endswith('.weight_ih_l0_reverse'):
+                        base_key = k.rsplit('.', 1)[0]
+                        new_key = f"{base_key}.backward_lstm.Wx"
+                        processed_mlx_state_dict[new_key] = v
+                    elif k.endswith('.weight_hh_l0_reverse'):
+                        base_key = k.rsplit('.', 1)[0]
+                        new_key = f"{base_key}.backward_lstm.Wh"
+                        processed_mlx_state_dict[new_key] = v
+                    elif k.endswith(('.bias_ih_l0_reverse', '.bias_hh_l0_reverse')):
+                        base_key = k.rsplit('.', 1)[0]
+                        new_key = f"{base_key}.backward_lstm.bias"
+                        processed_mlx_state_dict[new_key] = v
+                    elif k.endswith('.weight_ih_l0'):
+                        base_key = k.rsplit('.', 1)[0]
+                        new_key = f"{base_key}.forward_lstm.Wx"
+                        processed_mlx_state_dict[new_key] = v
+                    elif k.endswith('.weight_hh_l0'):
+                        base_key = k.rsplit('.', 1)[0]
+                        new_key = f"{base_key}.forward_lstm.Wh"
+                        processed_mlx_state_dict[new_key] = v
+                    elif k.endswith(('.bias_ih_l0', '.bias_hh_l0')):
+                        base_key = k.rsplit('.', 1)[0]
+                        new_key = f"{base_key}.forward_lstm.bias"
+                        processed_mlx_state_dict[new_key] = v
+                    else:
+                        processed_mlx_state_dict[k] = v
+
+
+                mlx_state_dict = processed_mlx_state_dict
                 logger.debug(f"MLX state dict: {mlx_state_dict.keys()}")
                 getattr(self, key).load_weights(list(mlx_state_dict.items()))
                 mx.eval(getattr(self, key).parameters())
                 getattr(self, key).eval()
 
-            if key == "predictor":
-                logger.debug(f"Loading {key} from state_dict")
-                logger.debug(getattr(self, key).parameters().keys())
-                # logger.debug(getattr(self, "predictor").F0[0].parameters())
+            # if key == "predictor":
+            #     logger.debug(f"Loading {key} from state_dict")
+            #     logger.debug(getattr(self, key).parameters().keys())
+            #     # logger.debug(getattr(self, "predictor").F0[0].parameters())
 
 
-                mlx_state_dict = {
-                    k.replace('module.', ''): mx.array(v)
-                    for k, v in state_dict.items()
-                }
+            #     mlx_state_dict = {
+            #         k.replace('module.', ''): mx.array(v)
+            #         for k, v in state_dict.items()
+            #     }
+            #     processed_mlx_state_dict = {}
+            #     for k, v in mlx_state_dict.items():
 
+            #         if "F0_proj.weight" in k:
+            #             processed_mlx_state_dict[k] = v.transpose(0, 2, 1)
 
-                mlx_state_dict = sanitize_state_dict(mlx_state_dict)
+            #         elif "N_proj.weight" in k:
+            #             processed_mlx_state_dict[k] = v.transpose(0, 2, 1)
 
-                logger.debug(f"MLX state dict: {mlx_state_dict.keys()}")
-                getattr(self, key).load_weights(list(mlx_state_dict.items()))
-                mx.eval(getattr(self, key).parameters())
-                getattr(self, key).eval()
+            #          # Replace weight_ih_l0_reverse and weight_hh_l0_reverse with Wx and Wh
+            #         elif k.endswith('.weight_ih_l0_reverse'):
+            #             base_key = k.rsplit('.', 1)[0]
+            #             new_key = f"{base_key}.backward_lstm.Wx"
+            #             processed_mlx_state_dict[new_key] = v
+            #         elif k.endswith('.weight_hh_l0_reverse'):
+            #             base_key = k.rsplit('.', 1)[0]
+            #             new_key = f"{base_key}.backward_lstm.Wh"
+            #             processed_mlx_state_dict[new_key] = v
+            #         elif k.endswith(('.bias_ih_l0_reverse', '.bias_hh_l0_reverse')):
+            #             base_key = k.rsplit('.', 1)[0]
+            #             new_key = f"{base_key}.backward_lstm.bias"
+            #             processed_mlx_state_dict[new_key] = v
+            #         elif k.endswith('.weight_ih_l0'):
+            #             base_key = k.rsplit('.', 1)[0]
+            #             new_key = f"{base_key}.forward_lstm.Wx"
+            #             processed_mlx_state_dict[new_key] = v
+            #         elif k.endswith('.weight_hh_l0'):
+            #             base_key = k.rsplit('.', 1)[0]
+            #             new_key = f"{base_key}.forward_lstm.Wh"
+            #             processed_mlx_state_dict[new_key] = v
+            #         elif k.endswith(('.bias_ih_l0', '.bias_hh_l0')):
+            #             base_key = k.rsplit('.', 1)[0]
+            #             new_key = f"{base_key}.forward_lstm.bias"
+            #             processed_mlx_state_dict[new_key] = v
+            #         else:
+            #             processed_mlx_state_dict[k] = v
+
+            #     mlx_state_dict = processed_mlx_state_dict
+            #     logger.debug(f"MLX state dict: {mlx_state_dict.keys()}")
+            #     getattr(self, key).load_weights(list(mlx_state_dict.items()))
+            #     mx.eval(getattr(self, key).parameters())
+            #     getattr(self, key).eval()
 
             if key == "decoder":
                 logger.debug(f"Loading {key} from state_dict")
@@ -213,6 +300,24 @@ class KModel(nn.Module):
                 }
 
                 # mlx_state_dict = sanitize_state_dict(mlx_state_dict)
+
+                processed_mlx_state_dict = {}
+                for k, v in mlx_state_dict.items():
+                    if "noise_convs" in k and k.endswith(".weight"):
+                        processed_mlx_state_dict[k] = v.transpose(0, 2, 1)
+
+                    elif "weight_v" in k:
+                        if check_array_shape(v):
+                            processed_mlx_state_dict[k] = v
+                        else:
+                            processed_mlx_state_dict[k] = v.transpose(0, 2, 1)
+
+                        # print(f"{k}: {processed_mlx_state_dict[k].shape}, {v.shape}")
+
+                    else:
+                        processed_mlx_state_dict[k] = v
+
+                mlx_state_dict = processed_mlx_state_dict
 
                 logger.debug(f"MLX state dict: {mlx_state_dict.keys()}")
                 getattr(self, key).load_weights(list(mlx_state_dict.items()))
@@ -230,8 +335,10 @@ class KModel(nn.Module):
         phonemes: str,
         ref_s: mx.array,
         speed: Number = 1,
-        return_output: bool = False # MARK: BACKWARD COMPAT
+        return_output: bool = False, # MARK: BACKWARD COMPAT
+        decoder: Optional[nn.Module] = None
     ) -> Union['KModel.Output', mx.array]:
+
         input_ids = list(filter(lambda i: i is not None, map(lambda p: self.vocab.get(p), phonemes)))
         logger.debug(f"phonemes: {phonemes} -> input_ids: {input_ids}")
         assert len(input_ids)+2 <= self.context_length, (len(input_ids)+2, self.context_length)
@@ -246,25 +353,53 @@ class KModel(nn.Module):
         d_en = self.bert_encoder(bert_dur).transpose(0, 2, 1)
         ref_s = ref_s
         s = ref_s[:, 128:]
+        d_en = torch.from_dlpack(d_en)
+        s = torch.from_dlpack(s)
+        input_lengths = torch.from_dlpack(input_lengths)
+        text_mask = torch.from_dlpack(text_mask)
+        # Predictor Not working in MLX
         d = self.predictor.text_encoder(d_en, s, input_lengths, text_mask)
-        print("d.shape", d.shape)
-        x = self.predictor.lstm(d)
-        print("x.shape", x.shape)
+        x, _= self.predictor.lstm(d)
         duration = self.predictor.duration_proj(x)
-        print("duration.shape", duration.shape)
-        duration = mx.sigmoid(duration).sum(axis=-1) / speed
-        pred_dur = mx.clip(mx.round(duration), a_min=1, a_max=None).astype(mx.int32)[0]
-        print("pred_dur.shape", pred_dur.shape)
-        logger.debug(f"pred_dur: {pred_dur.tolist()}")
-        print("pred_dur.shape", pred_dur.shape)
-        indices = mx.concatenate([mx.repeat(mx.array(i), int(n)) for i, n in enumerate(pred_dur)])
-        pred_aln_trg = mx.zeros((input_ids.shape[1], indices.shape[0]))
-        pred_aln_trg[indices, mx.arange(indices.shape[0])] = 1
+        duration = torch.sigmoid(duration).sum(axis=-1) / speed
+        pred_dur = torch.round(duration).clamp(min=1).long().squeeze()
+        indices = torch.repeat_interleave(torch.arange(input_ids.shape[1]), pred_dur)
+        pred_aln_trg = torch.zeros((input_ids.shape[1], indices.shape[0]))
+        pred_aln_trg[indices, torch.arange(indices.shape[0])] = 1
         pred_aln_trg = pred_aln_trg[None, :]
-        en = d.transpose(0, 2, 1) @ pred_aln_trg
+        en = d.transpose(-1, -2) @ pred_aln_trg
         F0_pred, N_pred = self.predictor.F0Ntrain(en, s)
-        t_en = self.text_encoder(input_ids, input_lengths, text_mask)
+        text_mask = mx.array(text_mask)
+        t_en = self.text_encoder(input_ids, input_lengths, text_mask) # Working fine in MLX
+        t_en = torch.from_dlpack(t_en)
         asr = t_en @ pred_aln_trg
-        audio = self.decoder(asr, F0_pred, N_pred, ref_s[:, :128])[0]
+
+        asr = mx.array(asr)
+        F0_pred = mx.array(F0_pred)
+        N_pred = mx.array(N_pred)
+        # audio = self.decoder(asr, F0_pred, N_pred, ref_s[:, :128])[0] #.cpu().detach().numpy() # Not working in MLX
+        audio = self.decoder(asr, F0_pred, N_pred, ref_s[:, :128])
+        x = torch.from_dlpack(audio[0])
+        s = torch.from_dlpack(audio[1])
+        F0_curve = torch.from_dlpack(audio[2])
+        asr_res = torch.from_dlpack(audio[3])
+        F0 = torch.from_dlpack(audio[4])
+        N = torch.from_dlpack(audio[5])
+        res = True
+        for i, (block, decoder_block) in enumerate(zip(decoder.decode, self.decoder.decode)):
+            if res:
+                x = torch.concatenate([x, asr_res, F0, N], axis=1)
+            if i in [3]:
+                x = block(x, s)
+            else:
+                x = mx.array(x)
+                x = decoder_block(x, mx.array(s))
+                x = torch.from_dlpack(x)
+
+            if hasattr(decoder_block, 'upsample_type') and decoder_block.upsample_type != "none":
+                res = False
+        audio = decoder.generator(x, s, F0_curve)[0].cpu().detach().numpy()
+
+
         logger.info(f"audio.shape: {audio.shape}")
         return self.Output(audio=audio, pred_dur=pred_dur) if return_output else audio
