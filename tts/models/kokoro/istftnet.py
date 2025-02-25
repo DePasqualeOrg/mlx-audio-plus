@@ -122,25 +122,27 @@ class ConvWeighted(nn.Module):
             bias = self.bias.reshape(1, 1, -1)
         else:
             bias = None
-        try:
-            if self.bias is not None:
-                return conv(x, weight, stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups) + bias
-            else:
-                return conv(x, weight, stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups)
 
+        def apply_conv(x, weight_to_use):
+            if self.bias is not None:
+                return conv(x, weight_to_use, stride=self.stride, padding=self.padding,
+                          dilation=self.dilation, groups=self.groups) + bias
+            return conv(x, weight_to_use, stride=self.stride, padding=self.padding,
+                      dilation=self.dilation, groups=self.groups)
+
+        try:
+            # Check if channels last match or if groups > 1 for ConvTransposed1d
+            if x.shape[-1] == weight.shape[-1] or self.groups > 1:
+                # Input is channels first, use weight as-is
+                return apply_conv(x, weight)
+            else:
+                # Input is channels last, need to transpose weight
+                return apply_conv(x, weight.T)
         except Exception as e:
             print(f"Error: {e}")
             print(f"x.shape: {x.shape}, weight.shape: {weight.shape}")
-            print(f"transpose_weight: {transpose_weight}")
-            try:
-                if self.bias is not None:
-                    return conv(x, weight.T, stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups) + bias
-                else:
-                    return conv(x, weight.T, stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups)
-            except Exception as e:
-                print(f"Error: {e}")
-                print(f"x.shape: {x.shape}, weight.shape: {weight.shape}")
-                raise e
+            raise e
+
 
 class _InstanceNorm(nn.Module):
     def __init__(
@@ -296,7 +298,6 @@ class AdaIN1d(nn.Module):
     def __init__(self, style_dim: int, num_features: int):
         super().__init__()
         self.norm = InstanceNorm1d(num_features, affine=False)
-        # self.norm = nn.Identity()
         self.fc = nn.Linear(style_dim, num_features * 2)
 
     def __call__(self, x: mx.array, s: mx.array) -> mx.array:
