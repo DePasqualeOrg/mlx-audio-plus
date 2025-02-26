@@ -1,12 +1,9 @@
 from .istftnet import Decoder
-from .modules import CustomAlbert, ProsodyPredictor, TextEncoder, AdaLayerNorm
-from kokoro.modules import ProsodyPredictor as TorchProsodyPredictor, TextEncoder as TorchTextEncoder, AdaLayerNorm as TorchAdaLayerNorm
-from kokoro.istftnet import Decoder as TorchDecoder
+from .modules import CustomAlbert, ProsodyPredictor, TextEncoder, AdaLayerNorm, CustomAlbert, AlbertModelArgs
 from dataclasses import dataclass
 from huggingface_hub import hf_hub_download
 from loguru import logger
 from numbers import Number
-from transformers import AlbertConfig
 from typing import Dict, Optional, Union
 import json
 import torch
@@ -14,6 +11,14 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 from ..interpolate import interpolate
+import sys
+
+# Force reset logger configuration at the top of your file
+logger.remove()  # Remove all handlers
+logger.configure(handlers=[{"sink": sys.stderr, "level": "DEBUG"}])  # Add back with explicit level
+
+# Add a test log message to verify logger is working
+logger.debug("LOGGER TEST - This message should appear")
 
 def check_array_shape(arr):
     shape = arr.shape
@@ -55,10 +60,12 @@ class KModel(nn.Module):
                 config = hf_hub_download(repo_id=KModel.REPO_ID, filename='config.json')
             with open(config, 'r', encoding='utf-8') as r:
                 config = json.load(r)
-                logger.debug(f"Loaded config: {config}")
+
+        logger.debug(f"Loaded config: {config}")
 
         self.vocab = config['vocab']
-        self.bert = CustomAlbert(AlbertConfig(vocab_size=config['n_token'], **config['plbert']))
+        self.bert = CustomAlbert(AlbertModelArgs(vocab_size=config['n_token'], **config['plbert']))
+
         self.bert_encoder = nn.Linear(self.bert.config.hidden_size, config['hidden_dim'])
         self.context_length = self.bert.config.max_position_embeddings
         self.predictor = ProsodyPredictor(
@@ -83,13 +90,41 @@ class KModel(nn.Module):
         for key, state_dict in state_dict.items():
             assert hasattr(self, key), key
 
-            if key in ['bert']:
-                try:
-                    getattr(self, key).load_state_dict(state_dict)
-                except:
-                    logger.debug(f"Did not load {key} from state_dict")
-                    state_dict = {k[7:]: v for k, v in state_dict.items()}
-                    getattr(self, key).load_state_dict(state_dict, strict=False)
+            # if key in ['bert']:
+            #     try:
+            #         getattr(self, key).load_state_dict(state_dict)
+            #     except:
+            #         logger.debug(f"Did not load {key} from state_dict")
+            #         state_dict = {k[7:]: v for k, v in state_dict.items()}
+            #         getattr(self, key).load_state_dict(state_dict, strict=False)
+
+            if key == "bert":
+                logger.debug(f"Loading {key} from state_dict")
+                logger.debug(getattr(self, key).parameters().keys())
+                logger.debug("encoder keys: ", getattr(self, key))
+
+
+                mlx_state_dict = {
+                    k.replace('module.', ''): mx.array(v)
+                    for k, v in state_dict.items()
+                }
+
+                processed_mlx_state_dict = {}
+                for k, v in mlx_state_dict.items():
+                    if "position_ids" in k:
+                        # Remove unused position_ids
+                        continue
+                    else:
+                        # print(k, v.shape)
+                        processed_mlx_state_dict[k] = v
+                mlx_state_dict = processed_mlx_state_dict
+
+                logger.debug(f"MLX state dict: {mlx_state_dict.keys()}")
+                getattr(self, key).load_weights(list(mlx_state_dict.items()))
+                mx.eval(getattr(self, key).parameters())
+                getattr(self, key).eval()
+
+
             if key == "bert_encoder":
                 logger.debug(f"Loading {key} from state_dict")
                 mlx_state_dict = {
@@ -108,7 +143,6 @@ class KModel(nn.Module):
                     k.replace('module.', ''): mx.array(v)
                     for k, v in state_dict.items()
                 }
-                # mlx_state_dict = sanitize_state_dict(mlx_state_dict)
                 processed_mlx_state_dict = {}
                 for k, v in mlx_state_dict.items():
                     if k.endswith(('.gamma', '.beta')):
@@ -175,7 +209,6 @@ class KModel(nn.Module):
             if key == "predictor":
                 logger.debug(f"Loading {key} from state_dict")
                 logger.debug(getattr(self, key).parameters().keys())
-                # logger.debug(getattr(self, "predictor").F0[0].parameters())
 
 
                 mlx_state_dict = {
@@ -249,7 +282,6 @@ class KModel(nn.Module):
                     for k, v in state_dict.items()
                 }
 
-                # mlx_state_dict = sanitize_state_dict(mlx_state_dict)
 
                 processed_mlx_state_dict = {}
                 for k, v in mlx_state_dict.items():
@@ -298,16 +330,13 @@ class KModel(nn.Module):
         text_mask = mx.repeat(text_mask, input_lengths.shape[0], axis=0).astype(input_lengths.dtype)
         text_mask = text_mask + 1 > input_lengths[:, None]
         # TODO: Convert input_ids to MLX array
-        bert_dur = self.bert(torch.from_numpy(np.array(input_ids)), attention_mask=torch.from_numpy(np.array(~text_mask)).int())
-        bert_dur = mx.array(bert_dur)
+        # bert_dur = self.bert(torch.from_numpy(np.array(input_ids)), attention_mask=torch.from_numpy(np.array(~text_mask)).int())
+        bert_dur, _ = self.bert(input_ids, attention_mask=(~text_mask).astype(mx.int32))
         d_en = self.bert_encoder(bert_dur).transpose(0, 2, 1)
         ref_s = ref_s
         s = ref_s[:, 128:]
-        # Predictor Not working in MLX
         d = self.predictor.text_encoder(d_en, s, input_lengths, text_mask)
-
-        x, _= self.predictor.lstm(d)
-
+        x, _ = self.predictor.lstm(d)
         duration = self.predictor.duration_proj(x)
         duration = mx.sigmoid(duration).sum(axis=-1) / speed
         pred_dur = mx.clip(mx.round(duration), a_min=1, a_max=None).astype(mx.int32)[0]
@@ -317,9 +346,9 @@ class KModel(nn.Module):
         pred_aln_trg = pred_aln_trg[None, :]
         en = d.transpose(0, 2, 1) @ pred_aln_trg
 
-        print(f"en.shape: {en.shape}", "d transposed: ", d.transpose(0, 2, 1).shape)
+        # print(f"en.shape: {en.shape}", "d transposed: ", d.transpose(0, 2, 1).shape)
         F0_pred, N_pred = self.predictor.F0Ntrain(en, s)
-        print(f"F0_pred.shape: {F0_pred.shape}, N_pred.shape: {N_pred.shape}")
+        # print(f"F0_pred.shape: {F0_pred.shape}, N_pred.shape: {N_pred.shape}")
         t_en = self.text_encoder(input_ids, input_lengths, text_mask) # Working fine in MLX
         asr = t_en @ pred_aln_trg
         audio = self.decoder(asr, F0_pred, N_pred, ref_s[:, :128])[0] # Working fine in MLX

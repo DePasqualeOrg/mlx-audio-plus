@@ -3,8 +3,9 @@ import math
 import mlx.core as mx
 import mlx.nn as nn
 from .istftnet import AdainResBlk1d, ConvWeighted
-from transformers import AlbertModel
-
+# from transformers import AlbertModel
+from ..base import BaseModelArgs
+from dataclasses import dataclass
 class LinearNorm(nn.Module):
     def __init__(self, in_dim, out_dim, bias=True, w_init_gain='linear'):
         super().__init__()
@@ -314,7 +315,6 @@ class ProsodyPredictor(nn.Module):
         # F0 prediction
         F0 = mx.transpose(x, (0, 2, 1))
         for block in self.F0:
-            print(f"F0.shape: {F0.shape}")
             F0 = block(F0, s)
 
         F0 = F0.swapaxes(2, 1)
@@ -368,12 +368,9 @@ class DurationEncoder(nn.Module):
                 x = mx.where(m[..., None].transpose(0, 2, 1), 0.0, x)
             else:
                 x = x.transpose(0, 2, 1)[0]
-                print(f"x.shape before block: {x.shape}")
                 x, _ = block(x)
-                print(f"x.shape after block: {x.shape}")
                 x = x.transpose(0, 2, 1)
                 x_pad = mx.zeros([x.shape[0], x.shape[1], m.shape[-1]])
-                print(f"x_pad.shape: {x_pad.shape} x.shape: {x.shape}")
                 x_pad[:, :, :x.shape[-1]] = x
                 x = x_pad
         return x.transpose(0, 2, 1)
@@ -382,7 +379,240 @@ class DurationEncoder(nn.Module):
 
 # https://github.com/yl4579/StyleTTS2/blob/main/Utils/PLBERT/util.py
 # TODO: Implement this in MLX
-class CustomAlbert(AlbertModel):
-    def forward(self, *args, **kwargs):
-        outputs = super().forward(*args, **kwargs)
-        return outputs.last_hidden_state
+
+
+
+@dataclass
+class AlbertModelArgs(BaseModelArgs):
+    num_hidden_layers: int
+    num_attention_heads: int
+    hidden_size: int
+    intermediate_size: int
+    max_position_embeddings: int
+    model_type: str = 'albert'
+    embedding_size: int = 128
+    inner_group_num: int = 1
+    num_hidden_groups: int = 1
+    hidden_dropout_prob: float = 0.1
+    attention_probs_dropout_prob: float = 0.1
+    type_vocab_size: int = 2
+    initializer_range: float = 0.02
+    layer_norm_eps: float = 1e-12
+    vocab_size: int = 30522
+    dropout: float = 0.0
+
+
+class AlbertEmbeddings(nn.Module):
+    def __init__(self, config: AlbertModelArgs):
+        super().__init__()
+        self.word_embeddings = nn.Embedding(config.vocab_size, config.embedding_size)
+        self.position_embeddings = nn.Embedding(
+            config.max_position_embeddings, config.embedding_size
+        )
+        self.token_type_embeddings = nn.Embedding(
+            config.type_vocab_size, config.embedding_size
+        )
+        self.LayerNorm = nn.LayerNorm(config.embedding_size, eps=config.layer_norm_eps)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+    def __call__(self, input_ids, token_type_ids=None, position_ids=None):
+        seq_length = input_ids.shape[1]
+        if position_ids is None:
+            position_ids = mx.arange(seq_length, dtype=mx.int32)[None, :]
+        if token_type_ids is None:
+            token_type_ids = mx.zeros_like(input_ids)
+
+        words_embeddings = self.word_embeddings(input_ids)
+        position_embeddings = self.position_embeddings(position_ids)
+        token_type_embeddings = self.token_type_embeddings(token_type_ids)
+
+        embeddings = words_embeddings + position_embeddings + token_type_embeddings
+        embeddings = self.LayerNorm(embeddings)
+        embeddings = self.dropout(embeddings)
+        return embeddings
+
+
+class AlbertSelfAttention(nn.Module):
+    def __init__(self, config: AlbertModelArgs):
+        super().__init__()
+        self.num_attention_heads = config.num_attention_heads
+        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
+        self.all_head_size = self.num_attention_heads * self.attention_head_size
+
+        self.query = nn.Linear(config.hidden_size, self.all_head_size)
+        self.key = nn.Linear(config.hidden_size, self.all_head_size)
+        self.value = nn.Linear(config.hidden_size, self.all_head_size)
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+
+        self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
+
+    def transpose_for_scores(self, x):
+        new_x_shape = x.shape[:-1] + (
+            self.num_attention_heads,
+            self.attention_head_size,
+        )
+        x = x.reshape(new_x_shape)
+        return x.transpose(0, 2, 1, 3)
+
+    def __call__(self, hidden_states, attention_mask=None):
+        mixed_query_layer = self.query(hidden_states)
+        mixed_key_layer = self.key(hidden_states)
+        mixed_value_layer = self.value(hidden_states)
+
+        query_layer = self.transpose_for_scores(mixed_query_layer)
+        key_layer = self.transpose_for_scores(mixed_key_layer)
+        value_layer = self.transpose_for_scores(mixed_value_layer)
+
+        attention_scores = mx.matmul(query_layer, key_layer.transpose(0, 1, 3, 2))
+        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+        if attention_mask is not None:
+            attention_scores = attention_scores + attention_mask
+
+        attention_probs = mx.softmax(attention_scores, axis=-1)
+        attention_probs = self.dropout(attention_probs)
+
+        context_layer = mx.matmul(attention_probs, value_layer)
+        context_layer = context_layer.transpose(0, 2, 1, 3)
+        new_context_layer_shape = context_layer.shape[:-2] + (self.all_head_size,)
+        context_layer = context_layer.reshape(new_context_layer_shape)
+
+        context_layer = self.dense(context_layer)
+        context_layer = self.LayerNorm(context_layer + hidden_states)
+
+        return context_layer
+
+
+class AlbertSelfOutput(nn.Module):
+    def __init__(self, config: AlbertModelArgs):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+    def __call__(self, hidden_states, input_tensor):
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        return hidden_states
+
+
+
+
+class AlbertIntermediate(nn.Module):
+    def __init__(self, config: AlbertModelArgs):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
+        self.intermediate_act_fn = nn.GELU()
+
+    def __call__(self, hidden_states):
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.intermediate_act_fn(hidden_states)
+        return hidden_states
+
+
+class AlbertOutput(nn.Module):
+    def __init__(self, config: AlbertModelArgs):
+        super().__init__()
+        self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+    def __call__(self, hidden_states, input_tensor):
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        return hidden_states
+
+
+class AlbertLayer(nn.Module):
+    def __init__(self, config: AlbertModelArgs):
+        super().__init__()
+        self.attention = AlbertSelfAttention(config)
+
+        # self.chunk_size_feed_forward = config.chunk_size_feed_forward
+        self.seq_len_dim = 1
+        self.full_layer_layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.ffn = nn.Linear(config.hidden_size, config.intermediate_size)
+        self.ffn_output = nn.Linear(config.intermediate_size, config.hidden_size)
+        self.activation = nn.GELU()
+
+    def __call__(self, hidden_states, attention_mask=None):
+        attention_output = self.attention(hidden_states, attention_mask)
+        ffn_output = self.ff_chunk(attention_output)
+        hidden_states = self.full_layer_layer_norm(ffn_output + attention_output)
+        return hidden_states
+
+    def ff_chunk(self, attention_output: mx.array) -> mx.array:
+        ffn_output = self.ffn(attention_output)
+        ffn_output = self.activation(ffn_output)
+        ffn_output = self.ffn_output(ffn_output)
+        return ffn_output
+
+class AlbertLayerGroup(nn.Module):
+    def __init__(self, config: AlbertModelArgs):
+        super().__init__()
+        self.albert_layers = [AlbertLayer(config) for _ in range(config.inner_group_num)]
+
+    def __call__(self, hidden_states, attention_mask=None):
+        for layer_module in self.albert_layers:
+            hidden_states = layer_module(hidden_states, attention_mask)
+        return hidden_states
+
+
+class AlbertEncoder(nn.Module):
+    def __init__(self, config: AlbertModelArgs):
+        super().__init__()
+        self.config = config
+        self.embedding_hidden_mapping_in = nn.Linear(config.embedding_size, config.hidden_size)
+        self.albert_layer_groups = [AlbertLayerGroup(config) for _ in range(config.num_hidden_groups)]
+
+    def __call__(self, hidden_states, attention_mask=None):
+        hidden_states = self.embedding_hidden_mapping_in(hidden_states)
+        for i in range(self.config.num_hidden_layers):
+            # Number of layers in a hidden group
+            layers_per_group = int(self.config.num_hidden_layers / self.config.num_hidden_groups)
+
+            # Index of the hidden group
+            group_idx = int(i / (self.config.num_hidden_layers / self.config.num_hidden_groups))
+
+            layer_group_output = self.albert_layer_groups[group_idx](
+                hidden_states,
+                attention_mask
+            )
+            hidden_states = layer_group_output
+        return hidden_states
+
+
+
+class CustomAlbert(nn.Module):
+    def __init__(self, config: AlbertModelArgs):
+        super().__init__()
+        self.config = config
+        self.embeddings = AlbertEmbeddings(config)
+        self.encoder = AlbertEncoder(config)
+        self.pooler = nn.Linear(config.hidden_size, config.hidden_size)
+
+    def __call__(self, input_ids, token_type_ids=None, attention_mask=None):
+        embedding_output = self.embeddings(input_ids, token_type_ids)
+
+        if attention_mask is not None:
+            attention_mask = attention_mask[:, None, None, :]
+            attention_mask = (1.0 - attention_mask) * -10000.0
+
+        encoder_outputs = self.encoder(embedding_output, attention_mask)
+        sequence_output = encoder_outputs
+        pooled_output = nn.tanh(self.pooler(sequence_output[:, 0]))
+
+        return sequence_output, pooled_output
+
+    def sanitize(self, weights):
+        sanitized_weights = {}
+        for k, v in weights.items():
+            if "position_ids" in k:
+                # Remove unused position_ids
+                continue
+            else:
+                sanitized_weights[k] = v
+        return sanitized_weights
