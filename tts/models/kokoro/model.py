@@ -11,6 +11,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 from ..interpolate import interpolate
+from ..base import check_array_shape
 import sys
 
 # Force reset logger configuration at the top of your file
@@ -20,20 +21,6 @@ logger.configure(handlers=[{"sink": sys.stderr, "level": "DEBUG"}])  # Add back 
 # Add a test log message to verify logger is working
 logger.debug("LOGGER TEST - This message should appear")
 
-def check_array_shape(arr):
-    shape = arr.shape
-
-    # Check if the shape has 4 dimensions
-    if len(shape) != 3:
-        return False
-
-    out_channels, kH, KW = shape
-
-    # Check if out_channels is the largest, and kH and KW are the same
-    if (out_channels >= kH) and (out_channels >= KW) and (kH == KW):
-        return True
-    else:
-        return False
 
 class KModel(nn.Module):
     '''
@@ -84,227 +71,145 @@ class KModel(nn.Module):
             model = hf_hub_download(repo_id=KModel.REPO_ID, filename='kokoro-v1_0.pth')
 
         logger.debug(f"Loading model from {model}")
-        state_dict = torch.load(model, map_location='cpu', weights_only=True)
-        logger.debug(f"State dict: {state_dict.keys()}")
-        logger.debug(model)
-        for key, state_dict in state_dict.items():
-            assert hasattr(self, key), key
+        weights = mx.load("./kokoro-v1_0.safetensors")
 
-            # if key in ['bert']:
-            #     try:
-            #         getattr(self, key).load_state_dict(state_dict)
-            #     except:
-            #         logger.debug(f"Did not load {key} from state_dict")
-            #         state_dict = {k[7:]: v for k, v in state_dict.items()}
-            #         getattr(self, key).load_state_dict(state_dict, strict=False)
+        logger.debug(f"State dict: {weights.keys()}")
+        sanitized_weights = {}
 
-            if key == "bert":
+        # TODO: Create separate sanitize functions for each layer
+        for key, state_dict in weights.items():
+
+            if key.startswith("bert"):
                 logger.debug(f"Loading {key} from state_dict")
-                logger.debug(getattr(self, key).parameters().keys())
-                logger.debug("encoder keys: ", getattr(self, key))
 
 
-                mlx_state_dict = {
-                    k.replace('module.', ''): mx.array(v)
-                    for k, v in state_dict.items()
-                }
+                if "position_ids" in key:
+                    # Remove unused position_ids
+                    continue
+                else:
+                    # print(k, v.shape)
+                    sanitized_weights[key] = state_dict
 
-                processed_mlx_state_dict = {}
-                for k, v in mlx_state_dict.items():
-                    if "position_ids" in k:
-                        # Remove unused position_ids
-                        continue
+
+            if key.startswith("bert_encoder"):
+                logger.debug(f"Loading {key} from state_dict")
+                sanitized_weights[key] = state_dict
+
+            if key.startswith("text_encoder"):
+                logger.debug(f"Loading {key} from state_dict")
+
+                if key.endswith(('.gamma', '.beta')):
+                    base_key = key.rsplit('.', 1)[0]
+                    if key.endswith(".gamma"):
+                        new_key = f"{base_key}.weight"
                     else:
-                        # print(k, v.shape)
-                        processed_mlx_state_dict[k] = v
-                mlx_state_dict = processed_mlx_state_dict
+                        new_key = f"{base_key}.bias"
 
-                logger.debug(f"MLX state dict: {mlx_state_dict.keys()}")
-                getattr(self, key).load_weights(list(mlx_state_dict.items()))
-                mx.eval(getattr(self, key).parameters())
-                getattr(self, key).eval()
+                    sanitized_weights[new_key] = state_dict
+                elif "weight_v" in key:
+                    if check_array_shape(state_dict):
+                        sanitized_weights[key] = state_dict
+                    else:
+                        sanitized_weights[key] = state_dict.transpose(0, 2, 1)
+
+                # Replace weight_ih_l0_reverse and weight_hh_l0_reverse with Wx and Wh
+                elif key.endswith('.weight_ih_l0_reverse'):
+                    base_key = key.rsplit('.', 1)[0]
+                    new_key = f"{base_key}.Wx_backward"
+                    sanitized_weights[new_key] = state_dict
+                elif key.endswith('.weight_hh_l0_reverse'):
+                    base_key = key.rsplit('.', 1)[0]
+                    new_key = f"{base_key}.Wh_backward"
+                    sanitized_weights[new_key] = state_dict
+                elif key.endswith('.bias_ih_l0_reverse'):
+                    base_key = key.rsplit('.', 1)[0]
+                    new_key = f"{base_key}.bias_ih_backward"
+                    sanitized_weights[new_key] = state_dict
+                elif key.endswith('.bias_hh_l0_reverse'):
+                    base_key = key.rsplit('.', 1)[0]
+                    new_key = f"{base_key}.bias_hh_backward"
+                    sanitized_weights[new_key] = state_dict
+                elif key.endswith('.weight_ih_l0'):
+                    base_key = key.rsplit('.', 1)[0]
+                    new_key = f"{base_key}.Wx_forward"
+                    sanitized_weights[new_key] = state_dict
+                elif key.endswith('.weight_hh_l0'):
+                    base_key = key.rsplit('.', 1)[0]
+                    new_key = f"{base_key}.Wh_forward"
+                    sanitized_weights[new_key] = state_dict
+                elif key.endswith('.bias_ih_l0'):
+                    base_key = key.rsplit('.', 1)[0]
+                    new_key = f"{base_key}.bias_ih_forward"
+                    sanitized_weights[new_key] = state_dict
+                elif key.endswith('.bias_hh_l0'):
+                    base_key = key.rsplit('.', 1)[0]
+                    new_key = f"{base_key}.bias_hh_forward"
+                    sanitized_weights[new_key] = state_dict
+                else:
+                    sanitized_weights[key] = state_dict
 
 
-            if key == "bert_encoder":
+            if key.startswith("predictor"):
                 logger.debug(f"Loading {key} from state_dict")
-                mlx_state_dict = {
-                    k.replace('module.', ''): mx.array(v)
-                    for k, v in state_dict.items()
-                }
-                getattr(self, key).load_weights(list(mlx_state_dict.items()))
-                mx.eval(getattr(self, key).parameters())
-                getattr(self, key).eval()
 
-            if key == "text_encoder":
-                logger.debug(f"Loading {key} from state_dict")
-                logger.debug(getattr(self, key).parameters().keys())
-                logger.debug(state_dict.keys())
-                mlx_state_dict = {
-                    k.replace('module.', ''): mx.array(v)
-                    for k, v in state_dict.items()
-                }
-                processed_mlx_state_dict = {}
-                for k, v in mlx_state_dict.items():
-                    if k.endswith(('.gamma', '.beta')):
-                        base_key = k.rsplit('.', 1)[0]
-                        if k.endswith(".gamma"):
-                            new_key = f"{base_key}.weight"
-                        else:
-                            new_key = f"{base_key}.bias"
+                if "F0_proj.weight" in key:
+                    sanitized_weights[key] = state_dict.transpose(0, 2, 1)
 
-                        processed_mlx_state_dict[new_key] = v
-                    elif "weight_v" in k:
-                        if check_array_shape(v):
-                            processed_mlx_state_dict[k] = v
-                        else:
-                            processed_mlx_state_dict[k] = v.transpose(0, 2, 1)
-                    # elif "weight_g" in k:
+                elif "N_proj.weight" in key:
+                    sanitized_weights[key] = state_dict.transpose(0, 2, 1)
 
-                    #     processed_mlx_state_dict[k] = v.transpose(1, 2, 0)
+                elif "weight_v" in key:
+                    if check_array_shape(state_dict):
+                        sanitized_weights[key] = state_dict
+                    else:
+                        sanitized_weights[key] = state_dict.transpose(0, 2, 1)
 
-                        # print(f"{k}: {processed_mlx_state_dict[k].shape}, {v.shape}")
                     # Replace weight_ih_l0_reverse and weight_hh_l0_reverse with Wx and Wh
-                    elif k.endswith('.weight_ih_l0_reverse'):
-                        base_key = k.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.Wx_backward"
-                        processed_mlx_state_dict[new_key] = v
-                    elif k.endswith('.weight_hh_l0_reverse'):
-                        base_key = k.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.Wh_backward"
-                        processed_mlx_state_dict[new_key] = v
-                    elif k.endswith('.bias_ih_l0_reverse'):
-                        base_key = k.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.bias_ih_backward"
-                        processed_mlx_state_dict[new_key] = v
-                    elif k.endswith('.bias_hh_l0_reverse'):
-                        base_key = k.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.bias_hh_backward"
-                        processed_mlx_state_dict[new_key] = v
-                    elif k.endswith('.weight_ih_l0'):
-                        base_key = k.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.Wx_forward"
-                        processed_mlx_state_dict[new_key] = v
-                    elif k.endswith('.weight_hh_l0'):
-                        base_key = k.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.Wh_forward"
-                        processed_mlx_state_dict[new_key] = v
-                    elif k.endswith('.bias_ih_l0'):
-                        base_key = k.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.bias_ih_forward"
-                        processed_mlx_state_dict[new_key] = v
-                    elif k.endswith('.bias_hh_l0'):
-                        base_key = k.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.bias_hh_forward"
-                        processed_mlx_state_dict[new_key] = v
-                    else:
-                        processed_mlx_state_dict[k] = v
+                elif key.endswith('.weight_ih_l0_reverse'):
+                    base_key = key.rsplit('.', 1)[0]
+                    new_key = f"{base_key}.Wx_backward"
+                    sanitized_weights[new_key] = state_dict
+                elif key.endswith('.weight_hh_l0_reverse'):
+                    base_key = key.rsplit('.', 1)[0]
+                    new_key = f"{base_key}.Wh_backward"
+                    sanitized_weights[new_key] = state_dict
+                elif key.endswith('.bias_ih_l0_reverse'):
+                    base_key = key.rsplit('.', 1)[0]
+                    new_key = f"{base_key}.bias_ih_backward"
+                    sanitized_weights[new_key] = state_dict
+                elif key.endswith('.bias_hh_l0_reverse'):
+                    base_key = key.rsplit('.', 1)[0]
+                    new_key = f"{base_key}.bias_hh_backward"
+                    sanitized_weights[new_key] = state_dict
+                elif key.endswith('.weight_ih_l0'):
+                    base_key = key.rsplit('.', 1)[0]
+                    new_key = f"{base_key}.Wx_forward"
+                    sanitized_weights[new_key] = state_dict
+                elif key.endswith('.weight_hh_l0'):
+                    base_key = key.rsplit('.', 1)[0]
+                    new_key = f"{base_key}.Wh_forward"
+                    sanitized_weights[new_key] = state_dict
+                elif key.endswith('.bias_ih_l0'):
+                    base_key = key.rsplit('.', 1)[0]
+                    new_key = f"{base_key}.bias_ih_forward"
+                    sanitized_weights[new_key] = state_dict
+                elif key.endswith('.bias_hh_l0'):
+                    base_key = key.rsplit('.', 1)[0]
+                    new_key = f"{base_key}.bias_hh_forward"
+                    sanitized_weights[new_key] = state_dict
+                else:
+                    sanitized_weights[key] = state_dict
 
-
-                mlx_state_dict = processed_mlx_state_dict
-                logger.debug(f"MLX state dict: {mlx_state_dict.keys()}")
-                getattr(self, key).load_weights(list(mlx_state_dict.items()))
-                mx.eval(getattr(self, key).parameters())
-                getattr(self, key).eval()
-
-            if key == "predictor":
+            if key.startswith("decoder"):
                 logger.debug(f"Loading {key} from state_dict")
-                logger.debug(getattr(self, key).parameters().keys())
+                sanitized_weights[key] = self.decoder.sanitize(key, state_dict)
 
 
-                mlx_state_dict = {
-                    k.replace('module.', ''): mx.array(v)
-                    for k, v in state_dict.items()
-                }
-                processed_mlx_state_dict = {}
-                for k, v in mlx_state_dict.items():
-
-                    if "F0_proj.weight" in k:
-                        processed_mlx_state_dict[k] = v.transpose(0, 2, 1)
-
-                    elif "N_proj.weight" in k:
-                        processed_mlx_state_dict[k] = v.transpose(0, 2, 1)
-
-                    elif "weight_v" in k:
-                        if check_array_shape(v):
-                            processed_mlx_state_dict[k] = v
-                        else:
-                            processed_mlx_state_dict[k] = v.transpose(0, 2, 1)
-
-                     # Replace weight_ih_l0_reverse and weight_hh_l0_reverse with Wx and Wh
-                    elif k.endswith('.weight_ih_l0_reverse'):
-                        base_key = k.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.Wx_backward"
-                        processed_mlx_state_dict[new_key] = v
-                    elif k.endswith('.weight_hh_l0_reverse'):
-                        base_key = k.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.Wh_backward"
-                        processed_mlx_state_dict[new_key] = v
-                    elif k.endswith('.bias_ih_l0_reverse'):
-                        base_key = k.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.bias_ih_backward"
-                        processed_mlx_state_dict[new_key] = v
-                    elif k.endswith('.bias_hh_l0_reverse'):
-                        base_key = k.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.bias_hh_backward"
-                        processed_mlx_state_dict[new_key] = v
-                    elif k.endswith('.weight_ih_l0'):
-                        base_key = k.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.Wx_forward"
-                        processed_mlx_state_dict[new_key] = v
-                    elif k.endswith('.weight_hh_l0'):
-                        base_key = k.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.Wh_forward"
-                        processed_mlx_state_dict[new_key] = v
-                    elif k.endswith('.bias_ih_l0'):
-                        base_key = k.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.bias_ih_forward"
-                        processed_mlx_state_dict[new_key] = v
-                    elif k.endswith('.bias_hh_l0'):
-                        base_key = k.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.bias_hh_forward"
-                        processed_mlx_state_dict[new_key] = v
-                    else:
-                        processed_mlx_state_dict[k] = v
-
-                mlx_state_dict = processed_mlx_state_dict
-                logger.debug(f"MLX state dict: {mlx_state_dict.keys()}")
-                getattr(self, key).load_weights(list(mlx_state_dict.items()))
-                mx.eval(getattr(self, key).parameters())
-                getattr(self, key).eval()
-
-            if key == "decoder":
-                logger.debug(f"Loading {key} from state_dict")
-                logger.debug(f"MLX model keys: {getattr(self, key).generator.resblocks[0].convs1[0].parameters().keys()}")
-                logger.debug(f"State dict keys: {state_dict.keys()}")
-
-                mlx_state_dict = {
-                    k.replace('module.', ''): mx.array(v)
-                    for k, v in state_dict.items()
-                }
-
-
-                processed_mlx_state_dict = {}
-                for k, v in mlx_state_dict.items():
-                    if "noise_convs" in k and k.endswith(".weight"):
-                        processed_mlx_state_dict[k] = v.transpose(0, 2, 1)
-
-                    elif "weight_v" in k:
-                        if check_array_shape(v):
-                            processed_mlx_state_dict[k] = v
-                        else:
-                            processed_mlx_state_dict[k] = v.transpose(0, 2, 1)
-
-                        # print(f"{k}: {processed_mlx_state_dict[k].shape}, {v.shape}")
-
-                    else:
-                        processed_mlx_state_dict[k] = v
-
-                mlx_state_dict = processed_mlx_state_dict
-
-                logger.debug(f"MLX state dict: {mlx_state_dict.keys()}")
-                getattr(self, key).load_weights(list(mlx_state_dict.items()))
-                mx.eval(getattr(self, key).parameters())
-                getattr(self, key).eval()
+        # Load weights
+        logger.debug(f"MLX state dict: {sanitized_weights.keys()}")
+        self.load_weights(list(sanitized_weights.items()))
+        mx.eval(self.parameters())
+        self.eval()
 
 
     @dataclass

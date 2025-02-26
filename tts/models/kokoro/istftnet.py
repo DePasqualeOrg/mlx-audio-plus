@@ -8,6 +8,7 @@ from scipy.signal import get_window
 from typing import List, Tuple, Optional
 import time
 from ..interpolate import interpolate
+from ..base import check_array_shape
 
 def get_padding(kernel_size: int, dilation: int = 1) -> int:
     return int((kernel_size * dilation - dilation) / 2)
@@ -763,3 +764,19 @@ class Decoder(nn.Module):
                 res = False
         x = self.generator(x, s, F0_curve) # Working in MLX
         return x
+
+    def sanitize(self, key, weights):
+        sanitized_weights = None
+        if "noise_convs" in key and key.endswith(".weight"):
+            sanitized_weights = weights.transpose(0, 2, 1)
+
+        elif "weight_v" in key:
+            if check_array_shape(weights):
+                sanitized_weights = weights
+            else:
+                sanitized_weights = weights.transpose(0, 2, 1)
+
+        else:
+            sanitized_weights = weights
+
+        return sanitized_weights
