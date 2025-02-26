@@ -243,7 +243,7 @@ class _InstanceNorm(nn.Module):
                     f" ({self.num_features}), but got: {input.shape[feature_dim]}."
                 )
             else:
-                warnings.warn(
+                print(
                     f"input's size at dim={feature_dim} does not match num_features. "
                     "You can silence this warning by not passing in num_features, "
                     "which is not used because affine=False"
