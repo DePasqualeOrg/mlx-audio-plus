@@ -1,0 +1,11 @@
+misaki>=0.7.15
+loguru>=0.7.3
+num2words>=0.5.14
+spacy>=3.8.4
+phonemizer>=3.3.0
+espeakng-loader>=0.2.4
+mlx>=0.22.0
+numpy>=1.26.4
+torch>=2.5.1
+transformers>=4.49.0
+sentencepiece>=0.2.0
