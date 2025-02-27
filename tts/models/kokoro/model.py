@@ -78,7 +78,7 @@ class KokoroModel(nn.Module):
         if quantization is None:
             for key, state_dict in weights.items():
 
-                if key.startswith("bert."):
+                if key.startswith("bert"):
                     if "position_ids" in key:
                         # Remove unused position_ids
                         continue
@@ -144,7 +144,6 @@ class KokoroModel(nn.Module):
 
 
                 if key.startswith("predictor"):
-
                     if "F0_proj.weight" in key:
                         sanitized_weights[key] = state_dict.transpose(0, 2, 1)
 
@@ -226,7 +225,6 @@ class KokoroModel(nn.Module):
         ref_s: mx.array,
         speed: Number = 1,
         return_output: bool = False, # MARK: BACKWARD COMPAT
-        decoder: Optional[nn.Module] = None
     ) -> Union['KokoroModel.Output', mx.array]:
         input_ids = list(filter(lambda i: i is not None, map(lambda p: self.vocab.get(p), phonemes)))
         logger.debug(f"phonemes: {phonemes} -> input_ids: {input_ids}")
@@ -236,7 +234,6 @@ class KokoroModel(nn.Module):
         text_mask = mx.arange(int(input_lengths.max()))[None, ...]
         text_mask = mx.repeat(text_mask, input_lengths.shape[0], axis=0).astype(input_lengths.dtype)
         text_mask = text_mask + 1 > input_lengths[:, None]
-
         bert_dur, _ = self.bert(input_ids, attention_mask=(~text_mask).astype(mx.int32))
         d_en = self.bert_encoder(bert_dur).transpose(0, 2, 1)
         ref_s = ref_s

@@ -2,6 +2,7 @@ from .model import KokoroModel
 from dataclasses import dataclass
 from huggingface_hub import hf_hub_download
 from loguru import logger
+import mlx.core as mx
 from misaki import en, espeak
 from numbers import Number
 from typing import Generator, List, Optional, Tuple, Union
@@ -212,7 +213,7 @@ class KokoroPipeline:
         pack: torch.FloatTensor,
         speed: Number = 1,
     ) -> KokoroModel.Output:
-        return model(ps, pack[len(ps)-1], speed, return_output=True)
+        return model(ps, mx.array(pack[len(ps)-1]), speed, return_output=True)
 
     def generate_from_tokens(
         self,
@@ -308,6 +309,7 @@ class KokoroPipeline:
         phonemes: str
         tokens: Optional[List[en.MToken]] = None
         output: Optional[KokoroModel.Output] = None
+        text_index: Optional[int] = None
 
         @property
         def audio(self) -> Optional[torch.FloatTensor]:
@@ -317,6 +319,7 @@ class KokoroPipeline:
         def pred_dur(self) -> Optional[torch.LongTensor]:
             return None if self.output is None else self.output.pred_dur
 
+        ### MARK: BEGIN BACKWARD COMPAT ###
         def __iter__(self):
             yield self.graphemes
             yield self.phonemes
@@ -327,6 +330,7 @@ class KokoroPipeline:
 
         def __len__(self):
             return 3
+
 
     def __call__(
         self,
@@ -342,8 +346,12 @@ class KokoroPipeline:
         pack = self.load_voice(voice) if model else None
         if isinstance(text, str):
             text = re.split(split_pattern, text.strip()) if split_pattern else [text]
-        for graphemes in text:
-            # TODO(prince): Unify G2P interface between English and non-English
+        # Process each segment
+        for graphemes_index, graphemes in enumerate(text):
+            if not graphemes.strip():  # Skip empty segments
+                continue
+
+            # English processing (unchanged)
             if self.lang_code in 'ab':
                 logger.debug(f"Processing English text: {graphemes[:50]}{'...' if len(graphemes) > 50 else ''}")
                 _, tokens = self.g2p(graphemes)
@@ -356,15 +364,50 @@ class KokoroPipeline:
                     output = KokoroPipeline.infer(model, ps, pack, speed) if model else None
                     if output is not None and output.pred_dur is not None:
                         KokoroPipeline.join_timestamps(tks, output.pred_dur)
+                    yield self.Result(graphemes=gs, phonemes=ps, tokens=tks, output=output, text_index=graphemes_index)
 
-                    logger.info(f"self.Result(graphemes=gs, phonemes=ps, tokens=tks, output=output): {self.Result(graphemes=gs, phonemes=ps, tokens=tks, output=output)}")
-                    yield self.Result(graphemes=gs, phonemes=ps, tokens=tks, output=output)
+            # Non-English processing with chunking
             else:
-                ps = self.g2p(graphemes)
-                if not ps:
-                    continue
-                elif len(ps) > 510:
-                    logger.warning(f'Truncating len(ps) == {len(ps)} > 510')
-                    ps = ps[:510]
-                output = KokoroPipeline.infer(model, ps, pack, speed) if model else None
-                yield self.Result(graphemes=graphemes, phonemes=ps, output=output)
+                # Split long text into smaller chunks (roughly 400 characters each)
+                # Using sentence boundaries when possible
+                chunk_size = 400
+                chunks = []
+
+                # Try to split on sentence boundaries first
+                sentences = re.split(r'([.!?]+)', graphemes)
+                current_chunk = ""
+
+                for i in range(0, len(sentences), 2):
+                    sentence = sentences[i]
+                    # Add the punctuation back if it exists
+                    if i + 1 < len(sentences):
+                        sentence += sentences[i + 1]
+
+                    if len(current_chunk) + len(sentence) <= chunk_size:
+                        current_chunk += sentence
+                    else:
+                        if current_chunk:
+                            chunks.append(current_chunk.strip())
+                        current_chunk = sentence
+
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+
+                # If no chunks were created (no sentence boundaries), fall back to character-based chunking
+                if not chunks:
+                    chunks = [graphemes[i:i+chunk_size] for i in range(0, len(graphemes), chunk_size)]
+
+                # Process each chunk
+                for chunk in chunks:
+                    if not chunk.strip():
+                        continue
+
+                    ps, _ = self.g2p(chunk)
+                    if not ps:
+                        continue
+                    elif len(ps) > 510:
+                        logger.warning(f'Truncating len(ps) == {len(ps)} > 510')
+                        ps = ps[:510]
+
+                    output = KokoroPipeline.infer(model, ps, pack, speed) if model else None
+                    yield self.Result(graphemes=chunk, phonemes=ps, output=output, text_index=graphemes_index)

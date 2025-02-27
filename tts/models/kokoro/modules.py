@@ -332,8 +332,6 @@ class ProsodyPredictor(nn.Module):
         return mx.squeeze(F0, axis=1), mx.squeeze(N, axis=1)
 
 
-
-
 class DurationEncoder(nn.Module):
     def __init__(self, sty_dim, d_model, nlayers, dropout=0.1):
         super().__init__()
@@ -348,17 +346,11 @@ class DurationEncoder(nn.Module):
         self.sty_dim = sty_dim
 
     def __call__(self, x, style, text_lengths, m):
-        x = mx.array(x)
-        style = mx.array(style)
-        text_lengths = mx.array(text_lengths)
-        m = mx.array(m)
         x = x.transpose(2, 0, 1)
         s = mx.broadcast_to(style, (x.shape[0], x.shape[1], style.shape[-1]))
         x = mx.concatenate([x, s], axis=-1)
         x = mx.where(m[..., None].transpose(1, 0, 2), 0.0, x)
         x = x.transpose(1, 2, 0)
-        # Works fine till here
-        # return x, s
 
 
         for block in self.lstms:

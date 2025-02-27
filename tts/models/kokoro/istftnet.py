@@ -669,7 +669,7 @@ class AdainResBlk1d(nn.Module):
         self.upsample_type = upsample
         self.upsample = UpSample1d(upsample)
         self.learned_sc = dim_in != dim_out
-        self._build_weights(dim_in, dim_out, style_dim, bias)
+        self._build_weights(dim_in, dim_out, style_dim)
         self.dropout = nn.Dropout(dropout_p)
         if upsample == 'none':
             self.pool = nn.Identity()
@@ -677,7 +677,7 @@ class AdainResBlk1d(nn.Module):
             self.pool = ConvWeighted(1, dim_in, kernel_size=3, stride=2, padding=1, groups=dim_in)
 
 
-    def _build_weights(self, dim_in, dim_out, style_dim, bias: bool = False):
+    def _build_weights(self, dim_in, dim_out, style_dim):
         self.conv1 = ConvWeighted(dim_in, dim_out, kernel_size=3, stride=1, padding=1)
         self.conv2 = ConvWeighted(dim_out, dim_out, kernel_size=3, stride=1, padding=1)
         self.norm1 = AdaIN1d(style_dim, dim_in)
@@ -702,7 +702,6 @@ class AdainResBlk1d(nn.Module):
 
         # Manually implement grouped ConvTranspose1d since MLX doesn't support groups
         x = x.swapaxes(2, 1)
-        # TODO: Replace with official MLX implementation
         x = self.pool(x, mx.conv_transpose1d) if self.upsample_type != 'none' else x
         x = mx.pad(x, ((0, 0), (1, 0), (0, 0))) if self.upsample_type != 'none' else x
         x = x.swapaxes(2, 1)
