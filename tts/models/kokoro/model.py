@@ -19,6 +19,27 @@ import sys
 logger.remove()  # Remove all handlers
 logger.configure(handlers=[{"sink": sys.stderr, "level": "DEBUG"}])  # Add back with explicit level
 
+def sanitize_lstm_weights(key: str, state_dict: mx.array) -> dict:
+    """Convert PyTorch LSTM weight keys to MLX LSTM weight keys."""
+    base_key = key.rsplit('.', 1)[0]
+
+    # Mapping of PyTorch LSTM weight suffixes to MLX weight names
+    weight_map = {
+        'weight_ih_l0_reverse': 'Wx_backward',
+        'weight_hh_l0_reverse': 'Wh_backward',
+        'bias_ih_l0_reverse': 'bias_ih_backward',
+        'bias_hh_l0_reverse': 'bias_hh_backward',
+        'weight_ih_l0': 'Wx_forward',
+        'weight_hh_l0': 'Wh_forward',
+        'bias_ih_l0': 'bias_ih_forward',
+        'bias_hh_l0': 'bias_hh_forward'
+    }
+
+    for suffix, new_suffix in weight_map.items():
+        if key.endswith(suffix):
+            return {f"{base_key}.{new_suffix}": state_dict}
+
+    return {key: state_dict}
 
 class KokoroModel(nn.Module):
     '''
@@ -107,40 +128,14 @@ class KokoroModel(nn.Module):
                             sanitized_weights[key] = state_dict.transpose(0, 2, 1)
 
                     # Replace weight_ih_l0_reverse and weight_hh_l0_reverse with Wx and Wh
-                    elif key.endswith('.weight_ih_l0_reverse'):
-                        base_key = key.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.Wx_backward"
-                        sanitized_weights[new_key] = state_dict
-                    elif key.endswith('.weight_hh_l0_reverse'):
-                        base_key = key.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.Wh_backward"
-                        sanitized_weights[new_key] = state_dict
-                    elif key.endswith('.bias_ih_l0_reverse'):
-                        base_key = key.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.bias_ih_backward"
-                        sanitized_weights[new_key] = state_dict
-                    elif key.endswith('.bias_hh_l0_reverse'):
-                        base_key = key.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.bias_hh_backward"
-                        sanitized_weights[new_key] = state_dict
-                    elif key.endswith('.weight_ih_l0'):
-                        base_key = key.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.Wx_forward"
-                        sanitized_weights[new_key] = state_dict
-                    elif key.endswith('.weight_hh_l0'):
-                        base_key = key.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.Wh_forward"
-                        sanitized_weights[new_key] = state_dict
-                    elif key.endswith('.bias_ih_l0'):
-                        base_key = key.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.bias_ih_forward"
-                        sanitized_weights[new_key] = state_dict
-                    elif key.endswith('.bias_hh_l0'):
-                        base_key = key.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.bias_hh_forward"
-                        sanitized_weights[new_key] = state_dict
+                    elif key.endswith(('.weight_ih_l0_reverse', '.weight_hh_l0_reverse',
+                                     '.bias_ih_l0_reverse', '.bias_hh_l0_reverse',
+                                     '.weight_ih_l0', '.weight_hh_l0',
+                                     '.bias_ih_l0', '.bias_hh_l0')):
+                        sanitized_weights.update(sanitize_lstm_weights(key, state_dict))
                     else:
                         sanitized_weights[key] = state_dict
+
 
 
                 if key.startswith("predictor"):
@@ -157,38 +152,11 @@ class KokoroModel(nn.Module):
                             sanitized_weights[key] = state_dict.transpose(0, 2, 1)
 
                         # Replace weight_ih_l0_reverse and weight_hh_l0_reverse with Wx and Wh
-                    elif key.endswith('.weight_ih_l0_reverse'):
-                        base_key = key.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.Wx_backward"
-                        sanitized_weights[new_key] = state_dict
-                    elif key.endswith('.weight_hh_l0_reverse'):
-                        base_key = key.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.Wh_backward"
-                        sanitized_weights[new_key] = state_dict
-                    elif key.endswith('.bias_ih_l0_reverse'):
-                        base_key = key.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.bias_ih_backward"
-                        sanitized_weights[new_key] = state_dict
-                    elif key.endswith('.bias_hh_l0_reverse'):
-                        base_key = key.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.bias_hh_backward"
-                        sanitized_weights[new_key] = state_dict
-                    elif key.endswith('.weight_ih_l0'):
-                        base_key = key.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.Wx_forward"
-                        sanitized_weights[new_key] = state_dict
-                    elif key.endswith('.weight_hh_l0'):
-                        base_key = key.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.Wh_forward"
-                        sanitized_weights[new_key] = state_dict
-                    elif key.endswith('.bias_ih_l0'):
-                        base_key = key.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.bias_ih_forward"
-                        sanitized_weights[new_key] = state_dict
-                    elif key.endswith('.bias_hh_l0'):
-                        base_key = key.rsplit('.', 1)[0]
-                        new_key = f"{base_key}.bias_hh_forward"
-                        sanitized_weights[new_key] = state_dict
+                    elif key.endswith(('.weight_ih_l0_reverse', '.weight_hh_l0_reverse',
+                                     '.bias_ih_l0_reverse', '.bias_hh_l0_reverse',
+                                     '.weight_ih_l0', '.weight_hh_l0',
+                                     '.bias_ih_l0', '.bias_hh_l0')):
+                        sanitized_weights.update(sanitize_lstm_weights(key, state_dict))
                     else:
                         sanitized_weights[key] = state_dict
 
