@@ -491,7 +491,6 @@ class AlbertSelfOutput(nn.Module):
 
 
 
-
 class AlbertIntermediate(nn.Module):
     def __init__(self, config: AlbertModelArgs):
         super().__init__()
@@ -523,7 +522,6 @@ class AlbertLayer(nn.Module):
         super().__init__()
         self.attention = AlbertSelfAttention(config)
 
-        # self.chunk_size_feed_forward = config.chunk_size_feed_forward
         self.seq_len_dim = 1
         self.full_layer_layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.ffn = nn.Linear(config.hidden_size, config.intermediate_size)

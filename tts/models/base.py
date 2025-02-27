@@ -1,6 +1,7 @@
 import inspect
-from dataclasses import dataclass
 
+from dataclasses import dataclass
+import mlx.core as mx
 
 @dataclass
 class BaseModelArgs:
@@ -30,3 +31,18 @@ def check_array_shape(arr):
         return True
     else:
         return False
+
+
+@dataclass
+class GenerationResult:
+    audio: mx.array
+    samples: int
+    segment_idx: int
+    token_count: int
+    audio_samples: int
+    audio_duration: str
+    real_time_factor: float
+    prompt: dict
+    audio_samples: dict
+    processing_time_seconds: float
+    peak_memory_usage: float

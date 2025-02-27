@@ -1,11 +1,38 @@
+import glob
 import mlx.nn as nn
+import mlx.core as mx
+import importlib
 import copy
+import logging
 from typing import Tuple, Union, Dict, Any
 from mlx.utils import tree_flatten, tree_unflatten
 from pathlib import Path
 import json
 
+from mlx_lm.utils import get_model_path, load_config, make_shards
+
+MODEL_REMAPPING = {}
 MAX_FILE_SIZE_GB = 5
+
+def get_model_and_args(model_type: str):
+    """
+    Retrieve the model object based on the configuration.
+
+    Args:
+        config (dict): The model configuration.
+
+    Returns:
+        A tuple containing the Model class and the ModelArgs class.
+    """
+    model_type = MODEL_REMAPPING.get(model_type, model_type)
+    try:
+        arch = importlib.import_module(f"models.{model_type}")
+    except ImportError:
+        msg = f"Model type {model_type} not supported."
+        logging.error(msg)
+        raise ValueError(msg)
+
+    return arch, model_type
 
 def get_class_predicate(weights=None):
     if weights:
@@ -18,31 +45,6 @@ def get_class_predicate(weights=None):
         return (
             lambda _, m: hasattr(m, "to_quantized") and m.weight.shape[-1] % 64 == 0
         )
-
-
-def make_shards(weights: dict, max_file_size_gb: int = MAX_FILE_SIZE_GB) -> list:
-    """
-    Splits the weights into smaller shards.
-
-    Args:
-        weights (dict): Model weights.
-        max_file_size_gb (int): Maximum size of each shard in gigabytes.
-
-    Returns:
-        list: List of weight shards.
-    """
-    max_file_size_bytes = max_file_size_gb << 30
-    shards = []
-    shard, shard_size = {}, 0
-    for k, v in weights.items():
-        if shard_size + v.nbytes > max_file_size_bytes:
-            shards.append(shard)
-            shard, shard_size = {}, 0
-        shard[k] = v
-        shard_size += v.nbytes
-    shards.append(shard)
-    return shards
-
 
 def quantize_model(
     model: nn.Module,
@@ -79,53 +81,85 @@ def quantize_model(
 
     return quantized_weights, quantized_config
 
-def save_weights(
-    save_path: Union[str, Path],
-    weights: Dict[str, Any],
-    *,
-    donate_weights: bool = False,
-) -> None:
-    """Save model weights into specified directory."""
-    if isinstance(save_path, str):
-        save_path = Path(save_path)
-    save_path.mkdir(parents=True, exist_ok=True)
 
-    shards = make_shards(weights)
-    shards_count = len(shards)
-    shard_file_format = (
-        "model-{:05d}-of-{:05d}.safetensors"
-        if shards_count > 1
-        else "model.safetensors"
-    )
 
-    total_size = sum(v.nbytes for v in weights.values())
-    index_data = {"metadata": {"total_size": total_size}, "weight_map": {}}
+def load_model(model_path: Path, lazy: bool = False, **kwargs) -> nn.Module:
+    """
+    Load and initialize the model from a given path.
 
-    # Write the weights and make sure no references are kept other than the
-    # necessary ones
-    if donate_weights:
-        weights.clear()
-        del weights
+    Args:
+        model_path (Path): The path to load the model from.
+        lazy (bool): If False eval the model parameters to make sure they are
+            loaded in memory before returning, otherwise they will be loaded
+            when needed. Default: ``False``
 
-    for i in range(len(shards)):
-        shard = shards[i]
-        shards[i] = None
-        shard_name = shard_file_format.format(i + 1, shards_count)
-        shard_path = save_path / shard_name
+    Returns:
+        nn.Module: The loaded and initialized model.
 
-        mx.save_safetensors(str(shard_path), shard, metadata={"format": "mlx"})
+    Raises:
+        FileNotFoundError: If the weight files (.safetensors) are not found.
+        ValueError: If the model class or args class are not found or cannot be instantiated.
+    """
+    name = None
+    if isinstance(model_path, str):
+        name = model_path.split("/")[-1].split("-")[0].lower()
+        model_path = get_model_path(model_path)
+    config = load_config(model_path, **kwargs)
 
-        for weight_name in shard.keys():
-            index_data["weight_map"][weight_name] = shard_name
-        del shard
+    model_type = config.get("model_type", name)
 
-    index_data["weight_map"] = {
-        k: index_data["weight_map"][k] for k in sorted(index_data["weight_map"])
-    }
+    quantization = config.get("quantization", None)
 
-    with open(save_path / "model.safetensors.index.json", "w") as f:
-        json.dump(
-            index_data,
-            f,
-            indent=4,
+    weight_files = glob.glob(str(model_path / "*.safetensors"))
+    if not weight_files:
+        logging.error(f"No safetensors found in {model_path}")
+        message = f"""
+No safetensors found in {model_path}
+Create safetensors using the following code:
+```
+from transformers import AutoModelForCausalLM, AutoProcessor
+
+model_id= "<huggingface_model_id>"
+model = AutoModelForCausalLM.from_pretrained(model_id)
+processor = AutoProcessor.from_pretrained(model_id)
+
+model.save_pretrained("<local_dir>")
+processor.save_pretrained("<local_dir>")
+```
+Then use the <local_dir> as the --hf-path in the convert script.
+```
+python -m mlx_vlm.convert --hf-path <local_dir> --mlx-path <mlx_dir>
+```
+        """
+        raise FileNotFoundError(message)
+
+    weights = {}
+    for wf in weight_files:
+        weights.update(mx.load(wf))
+
+    model_class, model_type = get_model_and_args(model_type=model_type)
+    model = model_class.Model(config)
+    quantization = config.get("quantization", None)
+    if quantization is None:
+        weights = model.sanitize(weights)
+
+    if quantization is not None:
+        # Handle legacy models which may not have everything quantized`
+        class_predicate = get_class_predicate(weights)
+
+        nn.quantize(
+            model,
+            **quantization,
+            class_predicate=class_predicate,
         )
+
+    model.load_weights(list(weights.items()))
+
+    if not lazy:
+        mx.eval(model.parameters())
+
+    model.eval()
+    return model
+
+
+

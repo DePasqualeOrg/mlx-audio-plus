@@ -1,22 +1,45 @@
-from setuptools import setup, find_packages
+import sys
+from pathlib import Path
 
+from setuptools import find_packages, setup
+
+# Get the project root directory
+root_dir = Path(__file__).parent
+
+# Add the package directory to the Python path
+package_dir = root_dir
+sys.path.append(str(package_dir))
+
+# Read the requirements from the requirements.txt file
+requirements_path = root_dir / "requirements.txt"
+with open(requirements_path) as fid:
+    requirements = [l.strip() for l in fid.readlines()]
+
+# Import the version from the package
+from version import __version__
+
+# Setup configuration
 setup(
     name="mlx-audio",
-    version="0.0.1",
-    packages=find_packages(),
-    install_requires=[
-        # List your package dependencies here
-    ],
-    author="Prince Canuma",
-    author_email="princecanuma@gmail.com",
+    version=__version__,
     description="MLX-Audio is a package for inference of text-to-speech (TTS) and speech-to-speech (STS) models locally on your Mac using MLX",
-    long_description=open("README.md").read(),
+    long_description=open(root_dir / "README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
+    author_email="prince.gdt@gmail.com",
+    author="Prince Canuma",
     url="https://github.com/Blaizzy/mlx-audio",
+    license="MIT",
+    install_requires=requirements,
+    packages=find_packages(where=root_dir),
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
     ],
-    python_requires=">=3.6",
+    python_requires=">=3.8",
+    entry_points={
+        "console_scripts": [
+            "mlx_audio.tts.generate = mlx_audio.tts.generate:main",
+        ]
+    },
 )

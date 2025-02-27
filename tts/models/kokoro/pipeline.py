@@ -1,11 +1,11 @@
-from .model import KokoroModel
 from dataclasses import dataclass
 from huggingface_hub import hf_hub_download
-from loguru import logger
+import logging
 import mlx.core as mx
+import mlx.nn as nn
 from misaki import en, espeak
 from numbers import Number
-from typing import Generator, List, Optional, Tuple, Union
+from typing import Generator, List, Optional, Tuple, Union, Any
 import re
 import torch
 
@@ -65,7 +65,8 @@ class KokoroPipeline:
     def __init__(
         self,
         lang_code: str,
-        model: Union[KokoroModel, bool] = True,
+        model: nn.Module,
+        repo_id: str,
         trf: bool = False,
     ):
         """Initialize a KokoroPipeline.
@@ -82,22 +83,17 @@ class KokoroPipeline:
         lang_code = ALIASES.get(lang_code, lang_code)
         assert lang_code in LANG_CODES, (lang_code, LANG_CODES)
         self.lang_code = lang_code
-        self.model = None
-        if isinstance(model, KokoroModel):
-            self.model = model
-        elif model:
-            try:
-                self.model = KokoroModel()
-            except RuntimeError as e:
-                raise
-
+        self.repo_id = repo_id
+        if repo_id is None:
+            raise ValueError("repo_id is required to load voices")
+        self.model = model
         self.voices = {}
         if lang_code in 'ab':
             try:
                 fallback = espeak.EspeakFallback(british=lang_code=='b')
             except Exception as e:
-                logger.warning("EspeakFallback not Enabled: OOD words will be skipped")
-                logger.warning({str(e)})
+                logging.warning("EspeakFallback not Enabled: OOD words will be skipped")
+                logging.warning({str(e)})
                 fallback = None
             self.g2p = en.G2P(trf=trf, british=lang_code=='b', fallback=fallback, unk='')
         elif lang_code == 'j':
@@ -105,18 +101,18 @@ class KokoroPipeline:
                 from misaki import ja
                 self.g2p = ja.JAG2P()
             except ImportError:
-                logger.error("You need to `pip install misaki[ja]` to use lang_code='j'")
+                logging.error("You need to `pip install misaki[ja]` to use lang_code='j'")
                 raise
         elif lang_code == 'z':
             try:
                 from misaki import zh
                 self.g2p = zh.ZHG2P()
             except ImportError:
-                logger.error("You need to `pip install misaki[zh]` to use lang_code='z'")
+                logging.error("You need to `pip install misaki[zh]` to use lang_code='z'")
                 raise
         else:
             language = LANG_CODES[lang_code]
-            logger.warning(f"Using EspeakG2P(language='{language}'). Chunking logic not yet implemented, so long texts may be truncated unless you split them with '\\n'.")
+            logging.warning(f"Using EspeakG2P(language='{language}'). Chunking logic not yet implemented, so long texts may be truncated unless you split them with '\\n'.")
             self.g2p = espeak.EspeakG2P(language=language)
 
     def load_single_voice(self, voice: str):
@@ -125,11 +121,11 @@ class KokoroPipeline:
         if voice.endswith('.pt'):
             f = voice
         else:
-            f = hf_hub_download(repo_id=KokoroModel.REPO_ID, filename=f'voices/{voice}.pt')
+            f = hf_hub_download(repo_id=self.repo_id, filename=f'voices/{voice}.pt')
             if not voice.startswith(self.lang_code):
                 v = LANG_CODES.get(voice, voice)
                 p = LANG_CODES.get(self.lang_code, self.lang_code)
-                logger.warning(f'Language mismatch, loading {v} voice into {p} pipeline.')
+                logging.warning(f'Language mismatch, loading {v} voice into {p} pipeline.')
         pack = torch.load(f, weights_only=True)
         self.voices[voice] = pack
         return pack
@@ -143,7 +139,7 @@ class KokoroPipeline:
     def load_voice(self, voice: str, delimiter: str = ",") -> torch.FloatTensor:
         if voice in self.voices:
             return self.voices[voice]
-        logger.debug(f"Loading voice: {voice}")
+        logging.debug(f"Loading voice: {voice}")
         packs = [self.load_single_voice(v) for v in voice.split(delimiter)]
         if len(packs) == 1:
             return packs[0]
@@ -191,7 +187,7 @@ class KokoroPipeline:
             if next_pcount > 510:
                 z = KokoroPipeline.waterfall_last(tks, next_pcount)
                 text = KokoroPipeline.tokens_to_text(tks[:z])
-                logger.debug(f"Chunking text at {z}: '{text[:30]}{'...' if len(text) > 30 else ''}'")
+                logging.debug(f"Chunking text at {z}: '{text[:30]}{'...' if len(text) > 30 else ''}'")
                 ps = KokoroPipeline.tokens_to_ps(tks[:z])
                 yield text, ps, tks[:z]
                 tks = tks[z:]
@@ -208,11 +204,11 @@ class KokoroPipeline:
     @classmethod
     def infer(
         cls,
-        model: KokoroModel,
+        model: nn.Module,
         ps: str,
         pack: torch.FloatTensor,
         speed: Number = 1,
-    ) -> KokoroModel.Output:
+    ):
         return model(ps, mx.array(pack[len(ps)-1]), speed, return_output=True)
 
     def generate_from_tokens(
@@ -220,7 +216,7 @@ class KokoroPipeline:
         tokens: Union[str, List[en.MToken]],
         voice: str,
         speed: Number = 1,
-        model: Optional[KokoroModel] = None
+        model: Optional[nn.Module] = None
     ) -> Generator['KokoroPipeline.Result', None, None]:
         """Generate audio from either raw phonemes or pre-processed tokens.
 
@@ -228,7 +224,7 @@ class KokoroPipeline:
             tokens: Either a phoneme string or list of pre-processed MTokens
             voice: The voice to use for synthesis
             speed: Speech speed modifier (default: 1)
-            model: Optional KokoroModel instance (uses pipeline's model if not provided)
+            model: Optional Model instance (uses pipeline's model if not provided)
 
         Yields:
             KokoroPipeline.Result containing the input tokens and generated audio
@@ -244,21 +240,21 @@ class KokoroPipeline:
 
         # Handle raw phoneme string
         if isinstance(tokens, str):
-            logger.debug("Processing phonemes from raw string")
+            logging.debug("Processing phonemes from raw string")
             if len(tokens) > 510:
                 raise ValueError(f'Phoneme string too long: {len(tokens)} > 510')
             output = KokoroPipeline.infer(model, tokens, pack, speed) if model else None
             yield self.Result(graphemes='', phonemes=tokens, output=output)
             return
 
-        logger.debug("Processing MTokens")
+        logging.debug("Processing MTokens")
         # Handle pre-processed tokens
         for gs, ps, tks in self.en_tokenize(tokens):
             if not ps:
                 continue
             elif len(ps) > 510:
-                logger.warning(f"Unexpected len(ps) == {len(ps)} > 510 and ps == '{ps}'")
-                logger.warning("Truncating to 510 characters")
+                logging.warning(f"Unexpected len(ps) == {len(ps)} > 510 and ps == '{ps}'")
+                logging.warning("Truncating to 510 characters")
                 ps = ps[:510]
             output = KokoroPipeline.infer(model, ps, pack, speed) if model else None
             if output is not None and output.pred_dur is not None:
@@ -308,15 +304,15 @@ class KokoroPipeline:
         graphemes: str
         phonemes: str
         tokens: Optional[List[en.MToken]] = None
-        output: Optional[KokoroModel.Output] = None
+        output: Optional[Any] = None
         text_index: Optional[int] = None
 
         @property
-        def audio(self) -> Optional[torch.FloatTensor]:
+        def audio(self) -> Optional[mx.array]:
             return None if self.output is None else self.output.audio
 
         @property
-        def pred_dur(self) -> Optional[torch.LongTensor]:
+        def pred_dur(self) -> Optional[mx.array]:
             return None if self.output is None else self.output.pred_dur
 
         ### MARK: BEGIN BACKWARD COMPAT ###
@@ -338,12 +334,10 @@ class KokoroPipeline:
         voice: Optional[str] = None,
         speed: Number = 1,
         split_pattern: Optional[str] = r'\n+',
-        model: Optional[KokoroModel] = None,
     ) -> Generator['KokoroPipeline.Result', None, None]:
-        model = model or self.model
-        if model and voice is None:
+        if voice is None:
             raise ValueError('Specify a voice: en_us_pipeline(text="Hello world!", voice="af_heart")')
-        pack = self.load_voice(voice) if model else None
+        pack = self.load_voice(voice) if self.model else None
         if isinstance(text, str):
             text = re.split(split_pattern, text.strip()) if split_pattern else [text]
         # Process each segment
@@ -353,15 +347,15 @@ class KokoroPipeline:
 
             # English processing (unchanged)
             if self.lang_code in 'ab':
-                logger.debug(f"Processing English text: {graphemes[:50]}{'...' if len(graphemes) > 50 else ''}")
+                # print(f"Processing English text: {graphemes[:50]}{'...' if len(graphemes) > 50 else ''}")
                 _, tokens = self.g2p(graphemes)
                 for gs, ps, tks in self.en_tokenize(tokens):
                     if not ps:
                         continue
                     elif len(ps) > 510:
-                        logger.warning(f"Unexpected len(ps) == {len(ps)} > 510 and ps == '{ps}'")
+                        logging.warning(f"Unexpected len(ps) == {len(ps)} > 510 and ps == '{ps}'")
                         ps = ps[:510]
-                    output = KokoroPipeline.infer(model, ps, pack, speed) if model else None
+                    output = KokoroPipeline.infer(self.model, ps, pack, speed) if self.model else None
                     if output is not None and output.pred_dur is not None:
                         KokoroPipeline.join_timestamps(tks, output.pred_dur)
                     yield self.Result(graphemes=gs, phonemes=ps, tokens=tks, output=output, text_index=graphemes_index)
@@ -406,8 +400,8 @@ class KokoroPipeline:
                     if not ps:
                         continue
                     elif len(ps) > 510:
-                        logger.warning(f'Truncating len(ps) == {len(ps)} > 510')
+                        logging.warning(f'Truncating len(ps) == {len(ps)} > 510')
                         ps = ps[:510]
 
-                    output = KokoroPipeline.infer(model, ps, pack, speed) if model else None
+                    output = KokoroPipeline.infer(self.model, ps, pack, speed) if self.model else None
                     yield self.Result(graphemes=chunk, phonemes=ps, output=output, text_index=graphemes_index)

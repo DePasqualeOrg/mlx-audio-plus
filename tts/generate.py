@@ -11,11 +11,11 @@ from utils import load_model
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="prince-canuma/Kokoro-82M", help="Path or repo id of the model")
-    parser.add_argument("--text", type=str, default="Hello world", help="Text to generate")
+    parser.add_argument("--text", type=str, default='''[Kokoro](/kˈOkəɹO/) is an open-weight TTS model with 82 million parameters. Despite its lightweight architecture, it delivers comparable quality to larger models while being significantly faster and more cost-efficient. With Apache-licensed weights, [Kokoro](/kˈOkəɹO/) can be deployed anywhere from production environments to personal projects.''', help="Text to generate")
     parser.add_argument("--voice", type=str, default="af_heart", help="Voice name")
     parser.add_argument("--speed", type=float, default=1.0, help="Speed of the audio")
     parser.add_argument("--lang_code", type=str, default="a", help="Language code")
-    parser.add_argument("--file_name", type=str, default="audio.wav", help="Output file name")
+    parser.add_argument("--file_prefix", type=str, default="audio", help="Output file name prefix")
     parser.add_argument("--verbose", action="store_false", help="Print verbose output")
 
     return parser.parse_args()
@@ -24,18 +24,32 @@ if __name__ == "__main__":
     args = parse_args()
     try:
         model = load_model(model_path=args.model)
-        print("Generating audio with the following parameters:")
-        print("--------------------------------")
-        print(f"    Text: {args.text}")
-        print(f"    Voice: {args.voice}")
-        print(f"    Speed: {args.speed}x")
-        print(f"    Language: {args.lang_code}")
-        print("--------------------------------")
+        print(
+            f"Model: {args.model}\n"
+            f"Text: {args.text}\n"
+            f"Voice: {args.voice}\n"
+            f"Speed: {args.speed}x\n"
+            f"Language: {args.lang_code}"
+        )
+        print("==========")
         results = model.generate(text=args.text, voice=args.voice, speed=args.speed, lang_code=args.lang_code, verbose=True)
-        print("\033[92mAudio generated successfully!\033[0m")
-        print(f"File name: {args.file_name}")
-        for _, samples, audio in results:
-            sf.write(args.file_name, audio, 24000)
+        print(f"\033[92mAudio generated successfully, saving to\033[0m {args.file_prefix}!")
+
+
+        for i, result in enumerate(results):
+
+            sf.write(f"{args.file_prefix}_{i:03d}.wav", result.audio, 24000)
+
+            if args.verbose:
+                print("==========")
+                print(f"Duration:              {result.audio_duration}")
+                print(f"Samples/sec:           {result.audio_samples['samples-per-sec']:.1f}")
+                print(f"Prompt:                {result.token_count} tokens, {result.prompt['tokens-per-sec']:.1f} tokens-per-sec")
+                print(f"Audio:                 {result.audio_samples['samples']} samples, {result.audio_samples['samples-per-sec']:.1f} samples-per-sec")
+                print(f"Real-time factor:      {result.real_time_factor:.2f}x")
+                print(f"Processing time:       {result.processing_time_seconds:.2f}s")
+                print(f"Peak memory usage:     {result.peak_memory_usage:.2f}GB")
+
     except ImportError as e:
         print(f"Import error: {e}")
         print("This might be due to incorrect Python path. Check your project structure.")

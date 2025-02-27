@@ -1,6 +1,7 @@
 from tts.models.kokoro.istftnet import Decoder
 from tts.models.kokoro.modules import CustomAlbert, ProsodyPredictor, TextEncoder, AdaLayerNorm, CustomAlbert, AlbertModelArgs
 from tts.models.kokoro.pipeline import KokoroPipeline
+from tts.models.base import GenerationResult
 from dataclasses import dataclass
 from huggingface_hub import hf_hub_download
 from loguru import logger
@@ -226,25 +227,23 @@ class Model(nn.Module):
             duration_hours = int(audio_duration_seconds // 3600)
             duration_str = f"{duration_hours:02d}:{duration_mins:02d}:{duration_secs:02d}.{duration_ms:03d}"
 
-            metrics.append({
-                "segment_idx": segment_idx,
-                "token_count": token_count,
-                "audio_samples": samples,
-                "audio_duration": duration_str,
-                "real_time_factor": round(rtf, 2),
-                "prompt": {
-                    "tokens": token_count,
-                    "tokens-per-sec": round(token_count / segment_time, 2) if segment_time > 0 else 0,
-                },
-                "audio": {
-                    "samples": samples,
-                    "samples-per-sec": round(samples / segment_time, 2) if segment_time > 0 else 0,
-                },
-                "processing_time_seconds": segment_time,
-            })
 
+            yield GenerationResult(
+                    audio=audio[0],
+                    samples=samples,
+                    segment_idx=segment_idx,
+                    token_count=token_count,
+                    audio_duration=duration_str,
+                    real_time_factor=round(rtf, 2),
+                    prompt={
+                        "tokens": token_count,
+                        "tokens-per-sec": round(token_count / segment_time, 2) if segment_time > 0 else 0,
+                    },
+                    audio_samples={
+                        "samples": samples,
+                        "samples-per-sec": round(samples / segment_time, 2) if segment_time > 0 else 0,
+                    },
+                    processing_time_seconds=segment_time,
+                    peak_memory_usage=mx.metal.get_peak_memory() / 1e9,
+                )
 
-            yield (metrics, samples, audio[0])
-
-        if verbose:
-            print(json.dumps(metrics, indent=4))
