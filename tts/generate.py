@@ -11,7 +11,7 @@ from utils import load_model
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="prince-canuma/Kokoro-82M", help="Path or repo id of the model")
-    parser.add_argument("--text", type=str, default='''[Kokoro](/kˈOkəɹO/) is an open-weight TTS model with 82 million parameters. Despite its lightweight architecture, it delivers comparable quality to larger models while being significantly faster and more cost-efficient. With Apache-licensed weights, [Kokoro](/kˈOkəɹO/) can be deployed anywhere from production environments to personal projects.''', help="Text to generate")
+    parser.add_argument("--text", type=str, default='The sky above the port', help="Text to generate")
     parser.add_argument("--voice", type=str, default="af_heart", help="Voice name")
     parser.add_argument("--speed", type=float, default=1.0, help="Speed of the audio")
     parser.add_argument("--lang_code", type=str, default="a", help="Language code")
