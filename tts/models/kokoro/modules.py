@@ -3,9 +3,9 @@ import math
 import mlx.core as mx
 import mlx.nn as nn
 from .istftnet import AdainResBlk1d, ConvWeighted
-# from transformers import AlbertModel
 from ..base import BaseModelArgs
 from dataclasses import dataclass
+
 class LinearNorm(nn.Module):
     def __init__(self, in_dim, out_dim, bias=True, w_init_gain='linear'):
         super().__init__()
@@ -40,17 +40,18 @@ class TextEncoder(nn.Module):
 
         for conv in self.cnn:
             for layer in conv:
-                if isinstance(layer, ConvWeighted):
+                if isinstance(layer, (ConvWeighted, nn.LayerNorm)):
                     x = x.swapaxes(2, 1)
-                    x = layer(x, mx.conv1d)
+                    x = layer(x, mx.conv1d) if isinstance(layer, ConvWeighted) else layer(x)
                     x = x.swapaxes(2, 1)
                 else:
                     x = layer(x)
 
+
                 x = mx.where(m, 0.0, x)
 
         x = x.swapaxes(2, 1)
-        x, _= self.lstm(x)
+        x, _ = self.lstm(x)
         x = x.swapaxes(2, 1)
         x_pad = mx.zeros([x.shape[0], x.shape[1], m.shape[-1]])
         x_pad[:, :, :x.shape[-1]] = x
