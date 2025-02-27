@@ -3,7 +3,7 @@ import os
 import soundfile as sf
 import argparse
 import json
-
+import mlx.core as mx
 
 from utils import load_model
 
@@ -17,7 +17,7 @@ def parse_args():
     parser.add_argument("--lang_code", type=str, default="a", help="Language code")
     parser.add_argument("--file_prefix", type=str, default="audio", help="Output file name prefix")
     parser.add_argument("--verbose", action="store_false", help="Print verbose output")
-
+    parser.add_argument("--join_audio", action="store_true", help="Join all audio files into one")
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -25,20 +25,22 @@ if __name__ == "__main__":
     try:
         model = load_model(model_path=args.model)
         print(
-            f"Model: {args.model}\n"
-            f"Text: {args.text}\n"
-            f"Voice: {args.voice}\n"
-            f"Speed: {args.speed}x\n"
-            f"Language: {args.lang_code}"
+            f"\n\033[94mModel:\033[0m {args.model}\n"
+            f"\033[94mText:\033[0m {args.text}\n"
+            f"\033[94mVoice:\033[0m {args.voice}\n"
+            f"\033[94mSpeed:\033[0m {args.speed}x\n"
+            f"\033[94mLanguage:\033[0m {args.lang_code}"
         )
         print("==========")
         results = model.generate(text=args.text, voice=args.voice, speed=args.speed, lang_code=args.lang_code, verbose=True)
         print(f"\033[92mAudio generated successfully, saving to\033[0m {args.file_prefix}!")
 
-
+        audio_list = []
         for i, result in enumerate(results):
-
-            sf.write(f"{args.file_prefix}_{i:03d}.wav", result.audio, 24000)
+            if args.join_audio:
+                audio_list.append(result.audio)
+            else:
+                sf.write(f"{args.file_prefix}_{i:03d}.wav", result.audio, 24000)
 
             if args.verbose:
                 print("==========")
@@ -50,6 +52,10 @@ if __name__ == "__main__":
                 print(f"Processing time:       {result.processing_time_seconds:.2f}s")
                 print(f"Peak memory usage:     {result.peak_memory_usage:.2f}GB")
 
+        if args.join_audio:
+            print(f"Joining {len(audio_list)} audio files")
+            audio = mx.concatenate(audio_list, axis=0)
+            sf.write(f"{args.file_prefix}.wav", audio, 24000)
     except ImportError as e:
         print(f"Import error: {e}")
         print("This might be due to incorrect Python path. Check your project structure.")
