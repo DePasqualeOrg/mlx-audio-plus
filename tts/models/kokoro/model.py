@@ -12,44 +12,43 @@ import mlx.nn as nn
 import numpy as np
 from ..interpolate import interpolate
 from ..base import check_array_shape
+from ...utils import get_class_predicate
 import sys
 
 # Force reset logger configuration at the top of your file
 logger.remove()  # Remove all handlers
 logger.configure(handlers=[{"sink": sys.stderr, "level": "DEBUG"}])  # Add back with explicit level
 
-# Add a test log message to verify logger is working
-logger.debug("LOGGER TEST - This message should appear")
 
-
-class KModel(nn.Module):
+class KokoroModel(nn.Module):
     '''
-    KModel is a torch.nn.Module with 2 main responsibilities:
+    KokoroModel is a torch.nn.Module with 2 main responsibilities:
     1. Init weights, downloading config.json + model.pth from HF if needed
     2. forward(phonemes: str, ref_s: FloatTensor) -> (audio: FloatTensor)
 
-    You likely only need one KModel instance, and it can be reused across
-    multiple KPipelines to avoid redundant memory allocation.
+    You likely only need one KokoroModel instance, and it can be reused across
+    multiple KokoroPipelines to avoid redundant memory allocation.
 
-    Unlike KPipeline, KModel is language-blind.
+    Unlike KokoroPipeline, KokoroModel is language-blind.
 
-    KModel stores self.vocab and thus knows how to map phonemes -> input_ids,
-    so there is no need to repeatedly download config.json outside of KModel.
+    KokoroModel stores self.vocab and thus knows how to map phonemes -> input_ids,
+    so there is no need to repeatedly download config.json outside of KokoroModel.
     '''
 
-    REPO_ID = 'hexgrad/Kokoro-82M'
+    REPO_ID = 'prince-canuma/Kokoro-82M'
 
-    def __init__(self, config: Union[Dict, str, None] = None, model: Optional[str] = None):
+    def __init__(self, repo_id: Optional[str] = None):
         super().__init__()
-        if not isinstance(config, dict):
-            if not config:
-                logger.debug("No config provided, downloading from HF")
-                config = hf_hub_download(repo_id=KModel.REPO_ID, filename='config.json')
-            with open(config, 'r', encoding='utf-8') as r:
-                config = json.load(r)
+        if not repo_id:
+            logger.debug("No config provided, downloading from HF")
+            config = hf_hub_download(repo_id=KokoroModel.REPO_ID, filename='config.json')
+        else:
+            config = hf_hub_download(repo_id=repo_id, filename='config.json')
 
-        logger.debug(f"Loaded config: {config}")
+        with open(config, 'r', encoding='utf-8') as r:
+            config = json.load(r)
 
+        self.config = config
         self.vocab = config['vocab']
         self.bert = CustomAlbert(AlbertModelArgs(vocab_size=config['n_token'], **config['plbert']))
 
@@ -67,146 +66,150 @@ class KModel(nn.Module):
             dim_in=config['hidden_dim'], style_dim=config['style_dim'],
             dim_out=config['n_mels'], **config['istftnet']
         )
-        if not model:
-            model = hf_hub_download(repo_id=KModel.REPO_ID, filename='kokoro-v1_0.pth')
 
-        logger.debug(f"Loading model from {model}")
-        weights = mx.load("./kokoro-v1_0.safetensors")
+        weight_files = hf_hub_download(repo_id=KokoroModel.REPO_ID if not repo_id else repo_id, filename='kokoro-v1_0.safetensors')
 
-        logger.debug(f"State dict: {weights.keys()}")
+        logger.debug(f"Loading model from {weight_files}")
+        weights = mx.load(weight_files)
         sanitized_weights = {}
 
         # TODO: Create separate sanitize functions for each layer
-        for key, state_dict in weights.items():
+        quantization = config.get("quantization", None)
+        if quantization is None:
+            for key, state_dict in weights.items():
 
-            if key.startswith("bert"):
-                logger.debug(f"Loading {key} from state_dict")
+                if key.startswith("bert."):
+                    if "position_ids" in key:
+                        # Remove unused position_ids
+                        continue
+                    else:
+                        # print(k, v.shape)
+                        sanitized_weights[key] = state_dict
 
 
-                if "position_ids" in key:
-                    # Remove unused position_ids
-                    continue
-                else:
-                    # print(k, v.shape)
+                if key.startswith("bert_encoder"):
                     sanitized_weights[key] = state_dict
 
+                if key.startswith("text_encoder"):
 
-            if key.startswith("bert_encoder"):
-                logger.debug(f"Loading {key} from state_dict")
-                sanitized_weights[key] = state_dict
+                    if key.endswith(('.gamma', '.beta')):
+                        base_key = key.rsplit('.', 1)[0]
+                        if key.endswith(".gamma"):
+                            new_key = f"{base_key}.weight"
+                        else:
+                            new_key = f"{base_key}.bias"
 
-            if key.startswith("text_encoder"):
-                logger.debug(f"Loading {key} from state_dict")
-
-                if key.endswith(('.gamma', '.beta')):
-                    base_key = key.rsplit('.', 1)[0]
-                    if key.endswith(".gamma"):
-                        new_key = f"{base_key}.weight"
-                    else:
-                        new_key = f"{base_key}.bias"
-
-                    sanitized_weights[new_key] = state_dict
-                elif "weight_v" in key:
-                    if check_array_shape(state_dict):
-                        sanitized_weights[key] = state_dict
-                    else:
-                        sanitized_weights[key] = state_dict.transpose(0, 2, 1)
-
-                # Replace weight_ih_l0_reverse and weight_hh_l0_reverse with Wx and Wh
-                elif key.endswith('.weight_ih_l0_reverse'):
-                    base_key = key.rsplit('.', 1)[0]
-                    new_key = f"{base_key}.Wx_backward"
-                    sanitized_weights[new_key] = state_dict
-                elif key.endswith('.weight_hh_l0_reverse'):
-                    base_key = key.rsplit('.', 1)[0]
-                    new_key = f"{base_key}.Wh_backward"
-                    sanitized_weights[new_key] = state_dict
-                elif key.endswith('.bias_ih_l0_reverse'):
-                    base_key = key.rsplit('.', 1)[0]
-                    new_key = f"{base_key}.bias_ih_backward"
-                    sanitized_weights[new_key] = state_dict
-                elif key.endswith('.bias_hh_l0_reverse'):
-                    base_key = key.rsplit('.', 1)[0]
-                    new_key = f"{base_key}.bias_hh_backward"
-                    sanitized_weights[new_key] = state_dict
-                elif key.endswith('.weight_ih_l0'):
-                    base_key = key.rsplit('.', 1)[0]
-                    new_key = f"{base_key}.Wx_forward"
-                    sanitized_weights[new_key] = state_dict
-                elif key.endswith('.weight_hh_l0'):
-                    base_key = key.rsplit('.', 1)[0]
-                    new_key = f"{base_key}.Wh_forward"
-                    sanitized_weights[new_key] = state_dict
-                elif key.endswith('.bias_ih_l0'):
-                    base_key = key.rsplit('.', 1)[0]
-                    new_key = f"{base_key}.bias_ih_forward"
-                    sanitized_weights[new_key] = state_dict
-                elif key.endswith('.bias_hh_l0'):
-                    base_key = key.rsplit('.', 1)[0]
-                    new_key = f"{base_key}.bias_hh_forward"
-                    sanitized_weights[new_key] = state_dict
-                else:
-                    sanitized_weights[key] = state_dict
-
-
-            if key.startswith("predictor"):
-                logger.debug(f"Loading {key} from state_dict")
-
-                if "F0_proj.weight" in key:
-                    sanitized_weights[key] = state_dict.transpose(0, 2, 1)
-
-                elif "N_proj.weight" in key:
-                    sanitized_weights[key] = state_dict.transpose(0, 2, 1)
-
-                elif "weight_v" in key:
-                    if check_array_shape(state_dict):
-                        sanitized_weights[key] = state_dict
-                    else:
-                        sanitized_weights[key] = state_dict.transpose(0, 2, 1)
+                        sanitized_weights[new_key] = state_dict
+                    elif "weight_v" in key:
+                        if check_array_shape(state_dict):
+                            sanitized_weights[key] = state_dict
+                        else:
+                            sanitized_weights[key] = state_dict.transpose(0, 2, 1)
 
                     # Replace weight_ih_l0_reverse and weight_hh_l0_reverse with Wx and Wh
-                elif key.endswith('.weight_ih_l0_reverse'):
-                    base_key = key.rsplit('.', 1)[0]
-                    new_key = f"{base_key}.Wx_backward"
-                    sanitized_weights[new_key] = state_dict
-                elif key.endswith('.weight_hh_l0_reverse'):
-                    base_key = key.rsplit('.', 1)[0]
-                    new_key = f"{base_key}.Wh_backward"
-                    sanitized_weights[new_key] = state_dict
-                elif key.endswith('.bias_ih_l0_reverse'):
-                    base_key = key.rsplit('.', 1)[0]
-                    new_key = f"{base_key}.bias_ih_backward"
-                    sanitized_weights[new_key] = state_dict
-                elif key.endswith('.bias_hh_l0_reverse'):
-                    base_key = key.rsplit('.', 1)[0]
-                    new_key = f"{base_key}.bias_hh_backward"
-                    sanitized_weights[new_key] = state_dict
-                elif key.endswith('.weight_ih_l0'):
-                    base_key = key.rsplit('.', 1)[0]
-                    new_key = f"{base_key}.Wx_forward"
-                    sanitized_weights[new_key] = state_dict
-                elif key.endswith('.weight_hh_l0'):
-                    base_key = key.rsplit('.', 1)[0]
-                    new_key = f"{base_key}.Wh_forward"
-                    sanitized_weights[new_key] = state_dict
-                elif key.endswith('.bias_ih_l0'):
-                    base_key = key.rsplit('.', 1)[0]
-                    new_key = f"{base_key}.bias_ih_forward"
-                    sanitized_weights[new_key] = state_dict
-                elif key.endswith('.bias_hh_l0'):
-                    base_key = key.rsplit('.', 1)[0]
-                    new_key = f"{base_key}.bias_hh_forward"
-                    sanitized_weights[new_key] = state_dict
-                else:
-                    sanitized_weights[key] = state_dict
+                    elif key.endswith('.weight_ih_l0_reverse'):
+                        base_key = key.rsplit('.', 1)[0]
+                        new_key = f"{base_key}.Wx_backward"
+                        sanitized_weights[new_key] = state_dict
+                    elif key.endswith('.weight_hh_l0_reverse'):
+                        base_key = key.rsplit('.', 1)[0]
+                        new_key = f"{base_key}.Wh_backward"
+                        sanitized_weights[new_key] = state_dict
+                    elif key.endswith('.bias_ih_l0_reverse'):
+                        base_key = key.rsplit('.', 1)[0]
+                        new_key = f"{base_key}.bias_ih_backward"
+                        sanitized_weights[new_key] = state_dict
+                    elif key.endswith('.bias_hh_l0_reverse'):
+                        base_key = key.rsplit('.', 1)[0]
+                        new_key = f"{base_key}.bias_hh_backward"
+                        sanitized_weights[new_key] = state_dict
+                    elif key.endswith('.weight_ih_l0'):
+                        base_key = key.rsplit('.', 1)[0]
+                        new_key = f"{base_key}.Wx_forward"
+                        sanitized_weights[new_key] = state_dict
+                    elif key.endswith('.weight_hh_l0'):
+                        base_key = key.rsplit('.', 1)[0]
+                        new_key = f"{base_key}.Wh_forward"
+                        sanitized_weights[new_key] = state_dict
+                    elif key.endswith('.bias_ih_l0'):
+                        base_key = key.rsplit('.', 1)[0]
+                        new_key = f"{base_key}.bias_ih_forward"
+                        sanitized_weights[new_key] = state_dict
+                    elif key.endswith('.bias_hh_l0'):
+                        base_key = key.rsplit('.', 1)[0]
+                        new_key = f"{base_key}.bias_hh_forward"
+                        sanitized_weights[new_key] = state_dict
+                    else:
+                        sanitized_weights[key] = state_dict
 
-            if key.startswith("decoder"):
-                logger.debug(f"Loading {key} from state_dict")
-                sanitized_weights[key] = self.decoder.sanitize(key, state_dict)
 
+                if key.startswith("predictor"):
+
+                    if "F0_proj.weight" in key:
+                        sanitized_weights[key] = state_dict.transpose(0, 2, 1)
+
+                    elif "N_proj.weight" in key:
+                        sanitized_weights[key] = state_dict.transpose(0, 2, 1)
+
+                    elif "weight_v" in key:
+                        if check_array_shape(state_dict):
+                            sanitized_weights[key] = state_dict
+                        else:
+                            sanitized_weights[key] = state_dict.transpose(0, 2, 1)
+
+                        # Replace weight_ih_l0_reverse and weight_hh_l0_reverse with Wx and Wh
+                    elif key.endswith('.weight_ih_l0_reverse'):
+                        base_key = key.rsplit('.', 1)[0]
+                        new_key = f"{base_key}.Wx_backward"
+                        sanitized_weights[new_key] = state_dict
+                    elif key.endswith('.weight_hh_l0_reverse'):
+                        base_key = key.rsplit('.', 1)[0]
+                        new_key = f"{base_key}.Wh_backward"
+                        sanitized_weights[new_key] = state_dict
+                    elif key.endswith('.bias_ih_l0_reverse'):
+                        base_key = key.rsplit('.', 1)[0]
+                        new_key = f"{base_key}.bias_ih_backward"
+                        sanitized_weights[new_key] = state_dict
+                    elif key.endswith('.bias_hh_l0_reverse'):
+                        base_key = key.rsplit('.', 1)[0]
+                        new_key = f"{base_key}.bias_hh_backward"
+                        sanitized_weights[new_key] = state_dict
+                    elif key.endswith('.weight_ih_l0'):
+                        base_key = key.rsplit('.', 1)[0]
+                        new_key = f"{base_key}.Wx_forward"
+                        sanitized_weights[new_key] = state_dict
+                    elif key.endswith('.weight_hh_l0'):
+                        base_key = key.rsplit('.', 1)[0]
+                        new_key = f"{base_key}.Wh_forward"
+                        sanitized_weights[new_key] = state_dict
+                    elif key.endswith('.bias_ih_l0'):
+                        base_key = key.rsplit('.', 1)[0]
+                        new_key = f"{base_key}.bias_ih_forward"
+                        sanitized_weights[new_key] = state_dict
+                    elif key.endswith('.bias_hh_l0'):
+                        base_key = key.rsplit('.', 1)[0]
+                        new_key = f"{base_key}.bias_hh_forward"
+                        sanitized_weights[new_key] = state_dict
+                    else:
+                        sanitized_weights[key] = state_dict
+
+                if key.startswith("decoder"):
+                    sanitized_weights[key] = self.decoder.sanitize(key, state_dict)
+
+        else:
+            sanitized_weights = weights
+
+        if (quantization := config.get("quantization", None)) is not None:
+            # Handle legacy models which may not have everything quantized`
+            class_predicate = get_class_predicate()
+
+            nn.quantize(
+                self,
+                **quantization,
+                class_predicate=class_predicate,
+            )
 
         # Load weights
-        logger.debug(f"MLX state dict: {sanitized_weights.keys()}")
         self.load_weights(list(sanitized_weights.items()))
         mx.eval(self.parameters())
         self.eval()
@@ -224,8 +227,7 @@ class KModel(nn.Module):
         speed: Number = 1,
         return_output: bool = False, # MARK: BACKWARD COMPAT
         decoder: Optional[nn.Module] = None
-    ) -> Union['KModel.Output', mx.array]:
-
+    ) -> Union['KokoroModel.Output', mx.array]:
         input_ids = list(filter(lambda i: i is not None, map(lambda p: self.vocab.get(p), phonemes)))
         logger.debug(f"phonemes: {phonemes} -> input_ids: {input_ids}")
         assert len(input_ids)+2 <= self.context_length, (len(input_ids)+2, self.context_length)
@@ -234,8 +236,7 @@ class KModel(nn.Module):
         text_mask = mx.arange(int(input_lengths.max()))[None, ...]
         text_mask = mx.repeat(text_mask, input_lengths.shape[0], axis=0).astype(input_lengths.dtype)
         text_mask = text_mask + 1 > input_lengths[:, None]
-        # TODO: Convert input_ids to MLX array
-        # bert_dur = self.bert(torch.from_numpy(np.array(input_ids)), attention_mask=torch.from_numpy(np.array(~text_mask)).int())
+
         bert_dur, _ = self.bert(input_ids, attention_mask=(~text_mask).astype(mx.int32))
         d_en = self.bert_encoder(bert_dur).transpose(0, 2, 1)
         ref_s = ref_s
@@ -250,14 +251,8 @@ class KModel(nn.Module):
         pred_aln_trg[indices, mx.arange(indices.shape[0])] = 1
         pred_aln_trg = pred_aln_trg[None, :]
         en = d.transpose(0, 2, 1) @ pred_aln_trg
-
-        # print(f"en.shape: {en.shape}", "d transposed: ", d.transpose(0, 2, 1).shape)
         F0_pred, N_pred = self.predictor.F0Ntrain(en, s)
-        # print(f"F0_pred.shape: {F0_pred.shape}, N_pred.shape: {N_pred.shape}")
         t_en = self.text_encoder(input_ids, input_lengths, text_mask) # Working fine in MLX
         asr = t_en @ pred_aln_trg
         audio = self.decoder(asr, F0_pred, N_pred, ref_s[:, :128])[0] # Working fine in MLX
-
-
-        logger.info(f"audio.shape: {audio.shape}, pred_dur.shape: {pred_dur.shape}")
         return self.Output(audio=audio, pred_dur=pred_dur) if return_output else audio

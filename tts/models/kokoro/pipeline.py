@@ -1,4 +1,4 @@
-from .model import KModel
+from .model import KokoroModel
 from dataclasses import dataclass
 from huggingface_hub import hf_hub_download
 from loguru import logger
@@ -39,39 +39,39 @@ LANG_CODES = dict(
     z='Mandarin Chinese',
 )
 
-class KPipeline:
+class KokoroPipeline:
     '''
-    KPipeline is a language-aware support class with 2 main responsibilities:
+    KokoroPipeline is a language-aware support class with 2 main responsibilities:
     1. Perform language-specific G2P, mapping (and chunking) text -> phonemes
     2. Manage and store voices, lazily downloaded from HF if needed
 
-    You are expected to have one KPipeline per language. If you have multiple
-    KPipelines, you should reuse one KModel instance across all of them.
+    You are expected to have one KokoroPipeline per language. If you have multiple
+    KokoroPipeline instances, you should reuse one KokoroModel instance across all of them.
 
-    KPipeline is designed to work with a KModel, but this is not required.
+    KokoroPipeline is designed to work with a KokoroModel, but this is not required.
     There are 2 ways to pass an existing model into a pipeline:
-    1. On init: us_pipeline = KPipeline(lang_code='a', model=model)
+    1. On init: us_pipeline = KokoroPipeline(lang_code='a', model=model)
     2. On call: us_pipeline(text, voice, model=model)
 
-    By default, KPipeline will automatically initialize its own KModel. To
-    suppress this, construct a "quiet" KPipeline with model=False.
+    By default, KokoroPipeline will automatically initialize its own KokoroModel. To
+    suppress this, construct a "quiet" KokoroPipeline with model=False.
 
-    A "quiet" KPipeline yields (graphemes, phonemes, None) without generating
+    A "quiet" KokoroPipeline yields (graphemes, phonemes, None) without generating
     any audio. You can use this to phonemize and chunk your text in advance.
 
-    A "loud" KPipeline _with_ a model yields (graphemes, phonemes, audio).
+    A "loud" KokoroPipeline _with_ a model yields (graphemes, phonemes, audio).
     '''
     def __init__(
         self,
         lang_code: str,
-        model: Union[KModel, bool] = True,
+        model: Union[KokoroModel, bool] = True,
         trf: bool = False,
     ):
-        """Initialize a KPipeline.
+        """Initialize a KokoroPipeline.
 
         Args:
             lang_code: Language code for G2P processing
-            model: KModel instance, True to create new model, False for no model
+            model: KokoroModel instance, True to create new model, False for no model
             trf: Whether to use transformer-based G2P
             device: Override default device selection ('cuda' or 'cpu', or None for auto)
                    If None, will auto-select cuda if available
@@ -82,11 +82,11 @@ class KPipeline:
         assert lang_code in LANG_CODES, (lang_code, LANG_CODES)
         self.lang_code = lang_code
         self.model = None
-        if isinstance(model, KModel):
+        if isinstance(model, KokoroModel):
             self.model = model
         elif model:
             try:
-                self.model = KModel()
+                self.model = KokoroModel()
             except RuntimeError as e:
                 raise
 
@@ -124,7 +124,7 @@ class KPipeline:
         if voice.endswith('.pt'):
             f = voice
         else:
-            f = hf_hub_download(repo_id=KModel.REPO_ID, filename=f'voices/{voice}.pt')
+            f = hf_hub_download(repo_id=KokoroModel.REPO_ID, filename=f'voices/{voice}.pt')
             if not voice.startswith(self.lang_code):
                 v = LANG_CODES.get(voice, voice)
                 p = LANG_CODES.get(self.lang_code, self.lang_code)
@@ -188,50 +188,49 @@ class KPipeline:
             next_ps = t.phonemes + (' ' if t.whitespace else '')
             next_pcount = pcount + len(next_ps.rstrip())
             if next_pcount > 510:
-                z = KPipeline.waterfall_last(tks, next_pcount)
-                text = KPipeline.tokens_to_text(tks[:z])
+                z = KokoroPipeline.waterfall_last(tks, next_pcount)
+                text = KokoroPipeline.tokens_to_text(tks[:z])
                 logger.debug(f"Chunking text at {z}: '{text[:30]}{'...' if len(text) > 30 else ''}'")
-                ps = KPipeline.tokens_to_ps(tks[:z])
+                ps = KokoroPipeline.tokens_to_ps(tks[:z])
                 yield text, ps, tks[:z]
                 tks = tks[z:]
-                pcount = len(KPipeline.tokens_to_ps(tks))
+                pcount = len(KokoroPipeline.tokens_to_ps(tks))
                 if not tks:
                     next_ps = next_ps.lstrip()
             tks.append(t)
             pcount += len(next_ps)
         if tks:
-            text = KPipeline.tokens_to_text(tks)
-            ps = KPipeline.tokens_to_ps(tks)
+            text = KokoroPipeline.tokens_to_text(tks)
+            ps = KokoroPipeline.tokens_to_ps(tks)
             yield ''.join(text).strip(), ''.join(ps).strip(), tks
 
     @classmethod
     def infer(
         cls,
-        model: KModel,
+        model: KokoroModel,
         ps: str,
         pack: torch.FloatTensor,
         speed: Number = 1,
-        decoder=None
-    ) -> KModel.Output:
-        return model(ps, pack[len(ps)-1], speed, return_output=True, decoder=decoder)
+    ) -> KokoroModel.Output:
+        return model(ps, pack[len(ps)-1], speed, return_output=True)
 
     def generate_from_tokens(
         self,
         tokens: Union[str, List[en.MToken]],
         voice: str,
         speed: Number = 1,
-        model: Optional[KModel] = None
-    ) -> Generator['KPipeline.Result', None, None]:
+        model: Optional[KokoroModel] = None
+    ) -> Generator['KokoroPipeline.Result', None, None]:
         """Generate audio from either raw phonemes or pre-processed tokens.
 
         Args:
             tokens: Either a phoneme string or list of pre-processed MTokens
             voice: The voice to use for synthesis
             speed: Speech speed modifier (default: 1)
-            model: Optional KModel instance (uses pipeline's model if not provided)
+            model: Optional KokoroModel instance (uses pipeline's model if not provided)
 
         Yields:
-            KPipeline.Result containing the input tokens and generated audio
+            KokoroPipeline.Result containing the input tokens and generated audio
 
         Raises:
             ValueError: If no voice is provided or token sequence exceeds model limits
@@ -247,7 +246,7 @@ class KPipeline:
             logger.debug("Processing phonemes from raw string")
             if len(tokens) > 510:
                 raise ValueError(f'Phoneme string too long: {len(tokens)} > 510')
-            output = KPipeline.infer(model, tokens, pack, speed) if model else None
+            output = KokoroPipeline.infer(model, tokens, pack, speed) if model else None
             yield self.Result(graphemes='', phonemes=tokens, output=output)
             return
 
@@ -260,9 +259,9 @@ class KPipeline:
                 logger.warning(f"Unexpected len(ps) == {len(ps)} > 510 and ps == '{ps}'")
                 logger.warning("Truncating to 510 characters")
                 ps = ps[:510]
-            output = KPipeline.infer(model, ps, pack, speed) if model else None
+            output = KokoroPipeline.infer(model, ps, pack, speed) if model else None
             if output is not None and output.pred_dur is not None:
-                KPipeline.join_timestamps(tks, output.pred_dur)
+                KokoroPipeline.join_timestamps(tks, output.pred_dur)
             yield self.Result(graphemes=gs, phonemes=ps, tokens=tks, output=output)
 
     @classmethod
@@ -308,7 +307,7 @@ class KPipeline:
         graphemes: str
         phonemes: str
         tokens: Optional[List[en.MToken]] = None
-        output: Optional[KModel.Output] = None
+        output: Optional[KokoroModel.Output] = None
 
         @property
         def audio(self) -> Optional[torch.FloatTensor]:
@@ -318,7 +317,6 @@ class KPipeline:
         def pred_dur(self) -> Optional[torch.LongTensor]:
             return None if self.output is None else self.output.pred_dur
 
-        ### MARK: BEGIN BACKWARD COMPAT ###
         def __iter__(self):
             yield self.graphemes
             yield self.phonemes
@@ -329,7 +327,6 @@ class KPipeline:
 
         def __len__(self):
             return 3
-        #### MARK: END BACKWARD COMPAT ####
 
     def __call__(
         self,
@@ -337,9 +334,8 @@ class KPipeline:
         voice: Optional[str] = None,
         speed: Number = 1,
         split_pattern: Optional[str] = r'\n+',
-        model: Optional[KModel] = None,
-        decoder=None
-    ) -> Generator['KPipeline.Result', None, None]:
+        model: Optional[KokoroModel] = None,
+    ) -> Generator['KokoroPipeline.Result', None, None]:
         model = model or self.model
         if model and voice is None:
             raise ValueError('Specify a voice: en_us_pipeline(text="Hello world!", voice="af_heart")')
@@ -347,7 +343,7 @@ class KPipeline:
         if isinstance(text, str):
             text = re.split(split_pattern, text.strip()) if split_pattern else [text]
         for graphemes in text:
-            # TODO(misaki): Unify G2P interface between English and non-English
+            # TODO(prince): Unify G2P interface between English and non-English
             if self.lang_code in 'ab':
                 logger.debug(f"Processing English text: {graphemes[:50]}{'...' if len(graphemes) > 50 else ''}")
                 _, tokens = self.g2p(graphemes)
@@ -357,10 +353,9 @@ class KPipeline:
                     elif len(ps) > 510:
                         logger.warning(f"Unexpected len(ps) == {len(ps)} > 510 and ps == '{ps}'")
                         ps = ps[:510]
-                    output = KPipeline.infer(model, ps, pack, speed, decoder=decoder) if model else None
-                    logger.info(f"output: {output}")
+                    output = KokoroPipeline.infer(model, ps, pack, speed) if model else None
                     if output is not None and output.pred_dur is not None:
-                        KPipeline.join_timestamps(tks, output.pred_dur)
+                        KokoroPipeline.join_timestamps(tks, output.pred_dur)
 
                     logger.info(f"self.Result(graphemes=gs, phonemes=ps, tokens=tks, output=output): {self.Result(graphemes=gs, phonemes=ps, tokens=tks, output=output)}")
                     yield self.Result(graphemes=gs, phonemes=ps, tokens=tks, output=output)
@@ -371,5 +366,5 @@ class KPipeline:
                 elif len(ps) > 510:
                     logger.warning(f'Truncating len(ps) == {len(ps)} > 510')
                     ps = ps[:510]
-                output = KPipeline.infer(model, ps, pack, speed, decoder=decoder) if model else None
+                output = KokoroPipeline.infer(model, ps, pack, speed) if model else None
                 yield self.Result(graphemes=graphemes, phonemes=ps, output=output)

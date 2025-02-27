@@ -1,4 +1,4 @@
-from .pipeline import KPipeline
-from .model import KModel
+from .pipeline import KokoroPipeline
+from .model import KokoroModel
 
-__all__ = ['KPipeline', 'KModel']
+__all__ = ['KokoroPipeline', 'KokoroModel']
