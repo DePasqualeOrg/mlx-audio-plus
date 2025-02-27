@@ -26,7 +26,7 @@ def get_model_and_args(model_type: str):
     """
     model_type = MODEL_REMAPPING.get(model_type, model_type)
     try:
-        arch = importlib.import_module(f"models.{model_type}")
+        arch = importlib.import_module(f"tts.models.{model_type}")
     except ImportError:
         msg = f"Model type {model_type} not supported."
         logging.error(msg)
