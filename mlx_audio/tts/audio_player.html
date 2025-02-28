@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Orb Audio Visualization</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            font-family: Arial, sans-serif;
+        }
+        #controls {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            color: white;
+            background-color: rgba(0, 0, 0, 0.5);
+            padding: 15px;
+            border-radius: 10px;
+        }
+        button {
+            background-color: #4CAF50;
+            border: none;
+            color: white;
+            padding: 8px 16px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 14px;
+            margin: 4px 2px;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        #stopBtn {
+            background-color: #f44336;
+        }
+        #status {
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <input type="file" id="audioUpload" accept="audio/*">
+        <button id="playBtn" disabled>Play</button>
+        <button id="stopBtn" disabled>Stop</button>
+        <div id="status">Upload an audio file to begin visualization</div>
+    </div>
+
+    <!-- Load Three.js from CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+    <script>
+        // DOM elements
+        const audioUpload = document.getElementById('audioUpload');
+        const playBtn = document.getElementById('playBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const statusElement = document.getElementById('status');
+
+        // Audio variables
+        let audioContext;
+        let analyser;
+        let dataArray;
+        let audioElement;
+        let audioSource;
+
+        // Three.js setup
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setClearColor(0x000000);
+        document.body.appendChild(renderer.domElement);
+
+        // Add orbit controls
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+
+        // Position camera
+        camera.position.set(0, 0, 100);
+        camera.lookAt(0, 0, 0);
+
+        // Add lights
+        const ambientLight = new THREE.AmbientLight(0x404040);
+        scene.add(ambientLight);
+
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        directionalLight.position.set(1, 1, 1);
+        scene.add(directionalLight);
+
+        const pointLight = new THREE.PointLight(0xffffff, 1, 100);
+        pointLight.position.set(0, 0, 0);
+        scene.add(pointLight);
+
+        // Create orb mesh
+        const sphereGeometry = new THREE.IcosahedronGeometry(30, 4); // Higher detail icosahedron
+        const sphereMaterial = new THREE.MeshPhongMaterial({
+            color: 0x0088ff,
+            emissive: 0x222222,
+            shininess: 30,
+            wireframe: false,
+            flatShading: true
+        });
+        const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
+        scene.add(sphere);
+
+        // Store original vertex positions
+        const originalVertices = [];
+        for (let i = 0; i < sphereGeometry.attributes.position.count; i++) {
+            originalVertices.push(
+                new THREE.Vector3(
+                    sphereGeometry.attributes.position.getX(i),
+                    sphereGeometry.attributes.position.getY(i),
+                    sphereGeometry.attributes.position.getZ(i)
+                )
+            );
+        }
+
+        // Create a glow effect
+        const glowGeometry = new THREE.SphereGeometry(32, 32, 32);
+        const glowMaterial = new THREE.MeshBasicMaterial({
+            color: 0x0088ff,
+            transparent: true,
+            opacity: 0.15,
+            side: THREE.BackSide
+        });
+        const glowMesh = new THREE.Mesh(glowGeometry, glowMaterial);
+        scene.add(glowMesh);
+
+        // Handle audio upload
+        audioUpload.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            statusElement.textContent = "Audio file loaded. Press Play to start.";
+
+            // Create audio element if it doesn't exist
+            if (!audioElement) {
+                audioElement = new Audio();
+            } else {
+                audioElement.pause();
+            }
+
+            audioElement.src = URL.createObjectURL(file);
+            audioElement.loop = false; // Changed to false to stop after one play
+
+            // Enable play button
+            playBtn.disabled = false;
+            stopBtn.disabled = true;
+
+            // Add ended event listener
+            audioElement.addEventListener('ended', function() {
+                statusElement.textContent = "Audio finished playing.";
+                playBtn.disabled = false;
+                stopBtn.disabled = true;
+                resetSphere();
+            });
+        });
+
+        // Play button handler
+        playBtn.addEventListener('click', function() {
+            if (!audioElement || !audioElement.src) {
+                statusElement.textContent = "Please upload an audio file first.";
+                return;
+            }
+
+            statusElement.textContent = "Playing audio...";
+
+            // Initialize audio context if needed
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            }
+
+            // Create analyser if needed
+            if (!analyser) {
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 256;
+                dataArray = new Uint8Array(analyser.frequencyBinCount);
+            }
+
+            // Connect audio element to analyser if not already connected
+            if (!audioSource) {
+                audioSource = audioContext.createMediaElementSource(audioElement);
+                audioSource.connect(analyser);
+                analyser.connect(audioContext.destination);
+            }
+
+            // Play audio
+            audioElement.play().then(() => {
+                playBtn.disabled = true;
+                stopBtn.disabled = false;
+            }).catch(error => {
+                statusElement.textContent = "Error playing audio: " + error.message;
+            });
+        });
+
+        // Stop button handler
+        stopBtn.addEventListener('click', function() {
+            if (audioElement) {
+                audioElement.pause();
+                audioElement.currentTime = 0;
+                statusElement.textContent = "Audio stopped. Press Play to restart.";
+                playBtn.disabled = false;
+                stopBtn.disabled = true;
+
+                // Reset sphere to original state
+                resetSphere();
+            }
+        });
+
+        // Reset sphere to original state
+        function resetSphere() {
+            const positionAttribute = sphereGeometry.attributes.position;
+
+            for (let i = 0; i < positionAttribute.count; i++) {
+                const originalVertex = originalVertices[i];
+                positionAttribute.setXYZ(i, originalVertex.x, originalVertex.y, originalVertex.z);
+            }
+
+            positionAttribute.needsUpdate = true;
+            sphereGeometry.computeVertexNormals();
+
+            // Reset colors
+            sphere.material.color.set(0x0088ff);
+            sphere.material.emissive.set(0x222222);
+            glowMesh.material.color.set(0x0088ff);
+        }
+
+        // Animation loop
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // Update controls
+            controls.update();
+
+            // Rotate sphere slowly
+            sphere.rotation.y += 0.002;
+            sphere.rotation.x += 0.001;
+            glowMesh.rotation.copy(sphere.rotation);
+
+            // Update visualization if audio is playing
+            if (analyser && dataArray && !audioElement.paused) {
+                analyser.getByteFrequencyData(dataArray);
+
+                // Calculate average frequency values for different ranges
+                const bassAvg = getAverageFrequency(dataArray, 0, 5);
+                const midAvg = getAverageFrequency(dataArray, 6, 20);
+                const trebleAvg = getAverageFrequency(dataArray, 21, 40);
+
+                // Update sphere vertices based on frequency data
+                const positionAttribute = sphereGeometry.attributes.position;
+
+                for (let i = 0; i < positionAttribute.count; i++) {
+                    const originalVertex = originalVertices[i];
+
+                    // Calculate normalized distance from center (0-1)
+                    const vertexLength = originalVertex.length();
+
+                    // Get frequency value based on vertex position
+                    let frequencyFactor;
+
+                    // Use different frequency ranges based on vertex position
+                    if (Math.abs(originalVertex.y) > vertexLength * 0.7) {
+                        // Top/bottom vertices - use treble
+                        frequencyFactor = trebleAvg / 255;
+                    } else if (Math.abs(originalVertex.x) > vertexLength * 0.7) {
+                        // Left/right vertices - use mids
+                        frequencyFactor = midAvg / 255;
+                    } else {
+                        // Other vertices - use bass
+                        frequencyFactor = bassAvg / 255;
+                    }
+
+                    // Scale vertex based on frequency
+                    const scaleFactor = 1 + frequencyFactor * 0.5;
+
+                    positionAttribute.setXYZ(
+                        i,
+                        originalVertex.x * scaleFactor,
+                        originalVertex.y * scaleFactor,
+                        originalVertex.z * scaleFactor
+                    );
+                }
+
+                positionAttribute.needsUpdate = true;
+                sphereGeometry.computeVertexNormals();
+
+                // Update colors based on frequency
+                const hue = (bassAvg / 255) * 0.3;
+                const saturation = 0.8;
+                const lightness = 0.4 + (midAvg / 255) * 0.2;
+
+                sphere.material.color.setHSL(hue, saturation, lightness);
+                sphere.material.emissive.setHSL(hue, saturation, lightness * 0.5);
+
+                // Update glow
+                glowMesh.material.color.setHSL(hue, saturation, lightness);
+                glowMesh.scale.set(
+                    1 + (bassAvg / 255) * 0.1,
+                    1 + (bassAvg / 255) * 0.1,
+                    1 + (bassAvg / 255) * 0.1
+                );
+
+                // Update point light
+                pointLight.intensity = 0.5 + (bassAvg / 255) * 1.5;
+                pointLight.color.setHSL(hue, saturation, lightness);
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // Helper function to get average frequency in a range
+        function getAverageFrequency(dataArray, startIndex, endIndex) {
+            let sum = 0;
+            for (let i = startIndex; i <= endIndex; i++) {
+                sum += dataArray[i];
+            }
+            return sum / (endIndex - startIndex + 1);
+        }
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // Start animation loop
+        animate();
+    </script>
+</body>
+</html>
