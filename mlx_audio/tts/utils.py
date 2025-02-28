@@ -1,18 +1,19 @@
-import glob
-import mlx.nn as nn
-import mlx.core as mx
-import importlib
 import copy
-import logging
-from typing import Tuple, Union, Dict, Any
-from mlx.utils import tree_flatten, tree_unflatten
-from pathlib import Path
+import glob
+import importlib
 import json
+import logging
+from pathlib import Path
+from typing import Any, Dict, Tuple, Union
 
+import mlx.core as mx
+import mlx.nn as nn
+from mlx.utils import tree_flatten, tree_unflatten
 from mlx_lm.utils import get_model_path, load_config, make_shards
 
 MODEL_REMAPPING = {}
 MAX_FILE_SIZE_GB = 5
+
 
 def get_model_and_args(model_type: str):
     """
@@ -26,13 +27,14 @@ def get_model_and_args(model_type: str):
     """
     model_type = MODEL_REMAPPING.get(model_type, model_type)
     try:
-        arch = importlib.import_module(f"tts.models.{model_type}")
+        arch = importlib.import_module(f"mlx_audio.tts.models.{model_type}")
     except ImportError:
         msg = f"Model type {model_type} not supported."
         logging.error(msg)
         raise ValueError(msg)
 
     return arch, model_type
+
 
 def get_class_predicate(weights=None):
     if weights:
@@ -42,9 +44,8 @@ def get_class_predicate(weights=None):
             and f"{p}.scales" in weights
         )
     else:
-        return (
-            lambda _, m: hasattr(m, "to_quantized") and m.weight.shape[-1] % 64 == 0
-        )
+        return lambda _, m: hasattr(m, "to_quantized") and m.weight.shape[-1] % 64 == 0
+
 
 def quantize_model(
     model: nn.Module,
@@ -80,7 +81,6 @@ def quantize_model(
     quantized_weights = dict(tree_flatten(model.parameters()))
 
     return quantized_weights, quantized_config
-
 
 
 def load_model(model_path: Path, lazy: bool = False, **kwargs) -> nn.Module:
@@ -160,6 +160,3 @@ python -m mlx_vlm.convert --hf-path <local_dir> --mlx-path <mlx_dir>
 
     model.eval()
     return model
-
-
-

@@ -1,7 +1,8 @@
 import inspect
-
 from dataclasses import dataclass
+
 import mlx.core as mx
+
 
 @dataclass
 class BaseModelArgs:
@@ -14,7 +15,6 @@ class BaseModelArgs:
                 if k in inspect.signature(cls).parameters
             }
         )
-
 
 
 def check_array_shape(arr):

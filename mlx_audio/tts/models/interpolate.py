@@ -1,12 +1,14 @@
+from typing import List, Optional, Tuple, Union
+
 import mlx.core as mx
-from typing import Optional, Union, List, Tuple
+
 
 def interpolate(
     input: mx.array,
     size: Optional[Union[int, Tuple[int, ...], List[int]]] = None,
     scale_factor: Optional[Union[float, List[float], Tuple[float, ...]]] = None,
     mode: str = "nearest",
-    align_corners: Optional[bool] = None
+    align_corners: Optional[bool] = None,
 ) -> mx.array:
     """Interpolate array with correct shape handling.
 
@@ -40,16 +42,24 @@ def interpolate(
         size = []
         for i in range(spatial_dims):
             # Use ceiling instead of floor to match PyTorch behavior
-            curr_size = max(1, int(mx.ceil(input.shape[i+2] * scale_factor[i])))
+            curr_size = max(1, int(mx.ceil(input.shape[i + 2] * scale_factor[i])))
             size.append(curr_size)
 
     # Handle 1D case (N, C, W)
     if spatial_dims == 1:
         return interpolate1d(input, size[0], mode, align_corners)
     else:
-        raise ValueError(f"Only 1D interpolation currently supported, got {spatial_dims}D")
+        raise ValueError(
+            f"Only 1D interpolation currently supported, got {spatial_dims}D"
+        )
 
-def interpolate1d(input: mx.array, size: int, mode: str = "linear", align_corners: Optional[bool] = None) -> mx.array:
+
+def interpolate1d(
+    input: mx.array,
+    size: int,
+    mode: str = "linear",
+    align_corners: Optional[bool] = None,
+) -> mx.array:
     """1D interpolation implementation."""
     batch_size, channels, in_width = input.shape
 

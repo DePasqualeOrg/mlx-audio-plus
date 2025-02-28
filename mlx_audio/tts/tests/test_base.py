@@ -1,12 +1,15 @@
 import unittest
-import numpy as np
+
 import mlx.core as mx
-from tts.models.base import BaseModelArgs, check_array_shape
+import numpy as np
+
+from mlx_audio.tts.models.base import BaseModelArgs, check_array_shape
 
 
 class TestBaseModel(unittest.TestCase):
     def test_base_model_args_from_dict(self):
         """Test BaseModelArgs.from_dict method."""
+
         # Define a test subclass
         class TestArgs(BaseModelArgs):
             def __init__(self, param1, param2, param3=None):

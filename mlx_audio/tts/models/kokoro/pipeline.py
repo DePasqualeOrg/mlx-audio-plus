@@ -1,47 +1,46 @@
-from dataclasses import dataclass
-from huggingface_hub import hf_hub_download
 import logging
+import re
+from dataclasses import dataclass
+from numbers import Number
+from typing import Any, Generator, List, Optional, Tuple, Union
+
 import mlx.core as mx
 import mlx.nn as nn
-from misaki import en, espeak
-from numbers import Number
-from typing import Generator, List, Optional, Tuple, Union, Any
-import re
 import torch
+from huggingface_hub import hf_hub_download
+from misaki import en, espeak
 
 ALIASES = {
-    'en-us': 'a',
-    'en-gb': 'b',
-    'es': 'e',
-    'fr-fr': 'f',
-    'hi': 'h',
-    'it': 'i',
-    'pt-br': 'p',
-    'ja': 'j',
-    'zh': 'z',
+    "en-us": "a",
+    "en-gb": "b",
+    "es": "e",
+    "fr-fr": "f",
+    "hi": "h",
+    "it": "i",
+    "pt-br": "p",
+    "ja": "j",
+    "zh": "z",
 }
 
 LANG_CODES = dict(
     # pip install misaki[en]
-    a='American English',
-    b='British English',
-
+    a="American English",
+    b="British English",
     # espeak-ng
-    e='es',
-    f='fr-fr',
-    h='hi',
-    i='it',
-    p='pt-br',
-
+    e="es",
+    f="fr-fr",
+    h="hi",
+    i="it",
+    p="pt-br",
     # pip install misaki[ja]
-    j='Japanese',
-
+    j="Japanese",
     # pip install misaki[zh]
-    z='Mandarin Chinese',
+    z="Mandarin Chinese",
 )
 
+
 class KokoroPipeline:
-    '''
+    """
     KokoroPipeline is a language-aware support class with 2 main responsibilities:
     1. Perform language-specific G2P, mapping (and chunking) text -> phonemes
     2. Manage and store voices, lazily downloaded from HF if needed
@@ -61,7 +60,8 @@ class KokoroPipeline:
     any audio. You can use this to phonemize and chunk your text in advance.
 
     A "loud" KokoroPipeline _with_ a model yields (graphemes, phonemes, audio).
-    '''
+    """
+
     def __init__(
         self,
         lang_code: str,
@@ -88,44 +88,56 @@ class KokoroPipeline:
             raise ValueError("repo_id is required to load voices")
         self.model = model
         self.voices = {}
-        if lang_code in 'ab':
+        if lang_code in "ab":
             try:
-                fallback = espeak.EspeakFallback(british=lang_code=='b')
+                fallback = espeak.EspeakFallback(british=lang_code == "b")
             except Exception as e:
                 logging.warning("EspeakFallback not Enabled: OOD words will be skipped")
                 logging.warning({str(e)})
                 fallback = None
-            self.g2p = en.G2P(trf=trf, british=lang_code=='b', fallback=fallback, unk='')
-        elif lang_code == 'j':
+            self.g2p = en.G2P(
+                trf=trf, british=lang_code == "b", fallback=fallback, unk=""
+            )
+        elif lang_code == "j":
             try:
                 from misaki import ja
+
                 self.g2p = ja.JAG2P()
             except ImportError:
-                logging.error("You need to `pip install misaki[ja]` to use lang_code='j'")
+                logging.error(
+                    "You need to `pip install misaki[ja]` to use lang_code='j'"
+                )
                 raise
-        elif lang_code == 'z':
+        elif lang_code == "z":
             try:
                 from misaki import zh
+
                 self.g2p = zh.ZHG2P()
             except ImportError:
-                logging.error("You need to `pip install misaki[zh]` to use lang_code='z'")
+                logging.error(
+                    "You need to `pip install misaki[zh]` to use lang_code='z'"
+                )
                 raise
         else:
             language = LANG_CODES[lang_code]
-            logging.warning(f"Using EspeakG2P(language='{language}'). Chunking logic not yet implemented, so long texts may be truncated unless you split them with '\\n'.")
+            logging.warning(
+                f"Using EspeakG2P(language='{language}'). Chunking logic not yet implemented, so long texts may be truncated unless you split them with '\\n'."
+            )
             self.g2p = espeak.EspeakG2P(language=language)
 
     def load_single_voice(self, voice: str):
         if voice in self.voices:
             return self.voices[voice]
-        if voice.endswith('.pt'):
+        if voice.endswith(".pt"):
             f = voice
         else:
-            f = hf_hub_download(repo_id=self.repo_id, filename=f'voices/{voice}.pt')
+            f = hf_hub_download(repo_id=self.repo_id, filename=f"voices/{voice}.pt")
             if not voice.startswith(self.lang_code):
                 v = LANG_CODES.get(voice, voice)
                 p = LANG_CODES.get(self.lang_code, self.lang_code)
-                logging.warning(f'Language mismatch, loading {v} voice into {p} pipeline.')
+                logging.warning(
+                    f"Language mismatch, loading {v} voice into {p} pipeline."
+                )
         pack = torch.load(f, weights_only=True)
         self.voices[voice] = pack
         return pack
@@ -136,6 +148,7 @@ class KokoroPipeline:
     If multiple voices are requested, they are averaged.
     Delimiter is optional and defaults to ','.
     """
+
     def load_voice(self, voice: str, delimiter: str = ",") -> torch.FloatTensor:
         if voice in self.voices:
             return self.voices[voice]
@@ -148,18 +161,27 @@ class KokoroPipeline:
 
     @classmethod
     def tokens_to_ps(cls, tokens: List[en.MToken]) -> str:
-        return ''.join(t.phonemes + (' ' if t.whitespace else '') for t in tokens).strip()
+        return "".join(
+            t.phonemes + (" " if t.whitespace else "") for t in tokens
+        ).strip()
 
     @classmethod
     def waterfall_last(
         cls,
         tokens: List[en.MToken],
         next_count: int,
-        waterfall: List[str] = ['!.?…', ':;', ',—'],
-        bumps: List[str] = [')', '”']
+        waterfall: List[str] = ["!.?…", ":;", ",—"],
+        bumps: List[str] = [")", "”"],
     ) -> int:
         for w in waterfall:
-            z = next((i for i, t in reversed(list(enumerate(tokens))) if t.phonemes in set(w)), None)
+            z = next(
+                (
+                    i
+                    for i, t in reversed(list(enumerate(tokens)))
+                    if t.phonemes in set(w)
+                ),
+                None,
+            )
             if z is None:
                 continue
             z += 1
@@ -171,23 +193,24 @@ class KokoroPipeline:
 
     @classmethod
     def tokens_to_text(cls, tokens: List[en.MToken]) -> str:
-        return ''.join(t.text + t.whitespace for t in tokens).strip()
+        return "".join(t.text + t.whitespace for t in tokens).strip()
 
     def en_tokenize(
-        self,
-        tokens: List[en.MToken]
+        self, tokens: List[en.MToken]
     ) -> Generator[Tuple[str, str, List[en.MToken]], None, None]:
         tks = []
         pcount = 0
         for t in tokens:
             # American English: ɾ => T
-            t.phonemes = '' if t.phonemes is None else t.phonemes.replace('ɾ', 'T')
-            next_ps = t.phonemes + (' ' if t.whitespace else '')
+            t.phonemes = "" if t.phonemes is None else t.phonemes.replace("ɾ", "T")
+            next_ps = t.phonemes + (" " if t.whitespace else "")
             next_pcount = pcount + len(next_ps.rstrip())
             if next_pcount > 510:
                 z = KokoroPipeline.waterfall_last(tks, next_pcount)
                 text = KokoroPipeline.tokens_to_text(tks[:z])
-                logging.debug(f"Chunking text at {z}: '{text[:30]}{'...' if len(text) > 30 else ''}'")
+                logging.debug(
+                    f"Chunking text at {z}: '{text[:30]}{'...' if len(text) > 30 else ''}'"
+                )
                 ps = KokoroPipeline.tokens_to_ps(tks[:z])
                 yield text, ps, tks[:z]
                 tks = tks[z:]
@@ -199,7 +222,7 @@ class KokoroPipeline:
         if tks:
             text = KokoroPipeline.tokens_to_text(tks)
             ps = KokoroPipeline.tokens_to_ps(tks)
-            yield ''.join(text).strip(), ''.join(ps).strip(), tks
+            yield "".join(text).strip(), "".join(ps).strip(), tks
 
     @classmethod
     def infer(
@@ -209,15 +232,15 @@ class KokoroPipeline:
         pack: torch.FloatTensor,
         speed: Number = 1,
     ):
-        return model(ps, mx.array(pack[len(ps)-1]), speed, return_output=True)
+        return model(ps, mx.array(pack[len(ps) - 1]), speed, return_output=True)
 
     def generate_from_tokens(
         self,
         tokens: Union[str, List[en.MToken]],
         voice: str,
         speed: Number = 1,
-        model: Optional[nn.Module] = None
-    ) -> Generator['KokoroPipeline.Result', None, None]:
+        model: Optional[nn.Module] = None,
+    ) -> Generator["KokoroPipeline.Result", None, None]:
         """Generate audio from either raw phonemes or pre-processed tokens.
 
         Args:
@@ -234,17 +257,19 @@ class KokoroPipeline:
         """
         model = model or self.model
         if model and voice is None:
-            raise ValueError('Specify a voice: pipeline.generate_from_tokens(..., voice="af_heart")')
+            raise ValueError(
+                'Specify a voice: pipeline.generate_from_tokens(..., voice="af_heart")'
+            )
 
-        pack = self.load_voice(voice)if model else None
+        pack = self.load_voice(voice) if model else None
 
         # Handle raw phoneme string
         if isinstance(tokens, str):
             logging.debug("Processing phonemes from raw string")
             if len(tokens) > 510:
-                raise ValueError(f'Phoneme string too long: {len(tokens)} > 510')
+                raise ValueError(f"Phoneme string too long: {len(tokens)} > 510")
             output = KokoroPipeline.infer(model, tokens, pack, speed) if model else None
-            yield self.Result(graphemes='', phonemes=tokens, output=output)
+            yield self.Result(graphemes="", phonemes=tokens, output=output)
             return
 
         logging.debug("Processing MTokens")
@@ -253,7 +278,9 @@ class KokoroPipeline:
             if not ps:
                 continue
             elif len(ps) > 510:
-                logging.warning(f"Unexpected len(ps) == {len(ps)} > 510 and ps == '{ps}'")
+                logging.warning(
+                    f"Unexpected len(ps) == {len(ps)} > 510 and ps == '{ps}'"
+                )
                 logging.warning("Truncating to 510 characters")
                 ps = ps[:510]
             output = KokoroPipeline.infer(model, ps, pack, speed) if model else None
@@ -279,7 +306,7 @@ class KokoroPipeline:
         # right = left + space_dur
         i = 1
         for t in tokens:
-            if i >= len(pred_dur)-1:
+            if i >= len(pred_dur) - 1:
                 break
             if not t.phonemes:
                 if t.whitespace:
@@ -292,7 +319,7 @@ class KokoroPipeline:
             if j >= len(pred_dur):
                 break
             t.start_ts = left / MAGIC_DIVISOR
-            token_dur = pred_dur[i: j].sum().item()
+            token_dur = pred_dur[i:j].sum().item()
             space_dur = pred_dur[j].item() if t.whitespace else 0
             left = right + (2 * token_dur) + space_dur
             t.end_ts = left / MAGIC_DIVISOR
@@ -327,16 +354,17 @@ class KokoroPipeline:
         def __len__(self):
             return 3
 
-
     def __call__(
         self,
         text: Union[str, List[str]],
         voice: Optional[str] = None,
         speed: Number = 1,
-        split_pattern: Optional[str] = r'\n+',
-    ) -> Generator['KokoroPipeline.Result', None, None]:
+        split_pattern: Optional[str] = r"\n+",
+    ) -> Generator["KokoroPipeline.Result", None, None]:
         if voice is None:
-            raise ValueError('Specify a voice: en_us_pipeline(text="Hello world!", voice="af_heart")')
+            raise ValueError(
+                'Specify a voice: en_us_pipeline(text="Hello world!", voice="af_heart")'
+            )
         pack = self.load_voice(voice) if self.model else None
         if isinstance(text, str):
             text = re.split(split_pattern, text.strip()) if split_pattern else [text]
@@ -346,19 +374,31 @@ class KokoroPipeline:
                 continue
 
             # English processing (unchanged)
-            if self.lang_code in 'ab':
+            if self.lang_code in "ab":
                 # print(f"Processing English text: {graphemes[:50]}{'...' if len(graphemes) > 50 else ''}")
                 _, tokens = self.g2p(graphemes)
                 for gs, ps, tks in self.en_tokenize(tokens):
                     if not ps:
                         continue
                     elif len(ps) > 510:
-                        logging.warning(f"Unexpected len(ps) == {len(ps)} > 510 and ps == '{ps}'")
+                        logging.warning(
+                            f"Unexpected len(ps) == {len(ps)} > 510 and ps == '{ps}'"
+                        )
                         ps = ps[:510]
-                    output = KokoroPipeline.infer(self.model, ps, pack, speed) if self.model else None
+                    output = (
+                        KokoroPipeline.infer(self.model, ps, pack, speed)
+                        if self.model
+                        else None
+                    )
                     if output is not None and output.pred_dur is not None:
                         KokoroPipeline.join_timestamps(tks, output.pred_dur)
-                    yield self.Result(graphemes=gs, phonemes=ps, tokens=tks, output=output, text_index=graphemes_index)
+                    yield self.Result(
+                        graphemes=gs,
+                        phonemes=ps,
+                        tokens=tks,
+                        output=output,
+                        text_index=graphemes_index,
+                    )
 
             # Non-English processing with chunking
             else:
@@ -368,7 +408,7 @@ class KokoroPipeline:
                 chunks = []
 
                 # Try to split on sentence boundaries first
-                sentences = re.split(r'([.!?]+)', graphemes)
+                sentences = re.split(r"([.!?]+)", graphemes)
                 current_chunk = ""
 
                 for i in range(0, len(sentences), 2):
@@ -389,7 +429,10 @@ class KokoroPipeline:
 
                 # If no chunks were created (no sentence boundaries), fall back to character-based chunking
                 if not chunks:
-                    chunks = [graphemes[i:i+chunk_size] for i in range(0, len(graphemes), chunk_size)]
+                    chunks = [
+                        graphemes[i : i + chunk_size]
+                        for i in range(0, len(graphemes), chunk_size)
+                    ]
 
                 # Process each chunk
                 for chunk in chunks:
@@ -400,8 +443,17 @@ class KokoroPipeline:
                     if not ps:
                         continue
                     elif len(ps) > 510:
-                        logging.warning(f'Truncating len(ps) == {len(ps)} > 510')
+                        logging.warning(f"Truncating len(ps) == {len(ps)} > 510")
                         ps = ps[:510]
 
-                    output = KokoroPipeline.infer(self.model, ps, pack, speed) if self.model else None
-                    yield self.Result(graphemes=chunk, phonemes=ps, output=output, text_index=graphemes_index)
+                    output = (
+                        KokoroPipeline.infer(self.model, ps, pack, speed)
+                        if self.model
+                        else None
+                    )
+                    yield self.Result(
+                        graphemes=chunk,
+                        phonemes=ps,
+                        output=output,
+                        text_index=graphemes_index,
+                    )

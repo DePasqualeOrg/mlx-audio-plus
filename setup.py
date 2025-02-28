@@ -39,7 +39,7 @@ setup(
     python_requires=">=3.8",
     entry_points={
         "console_scripts": [
-            "mlx_audio.tts.generate = mlx_audio.tts.generate:main",
+            "tts.generate = tts.generate:main",
         ]
     },
 )

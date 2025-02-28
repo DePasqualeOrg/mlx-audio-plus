@@ -1,16 +1,18 @@
-from typing import Optional, Tuple, List, Union
 import math
+from dataclasses import dataclass
+from typing import List, Optional, Tuple, Union
+
 import mlx.core as mx
 import mlx.nn as nn
-from .istftnet import AdainResBlk1d, ConvWeighted
+
 from ..base import BaseModelArgs
-from dataclasses import dataclass
+from .istftnet import AdainResBlk1d, ConvWeighted
+
 
 class LinearNorm(nn.Module):
-    def __init__(self, in_dim, out_dim, bias=True, w_init_gain='linear'):
+    def __init__(self, in_dim, out_dim, bias=True, w_init_gain="linear"):
         super().__init__()
         self.linear_layer = nn.Linear(in_dim, out_dim, bias=bias)
-
 
     def __call__(self, x):
         return self.linear_layer(x)
@@ -23,14 +25,18 @@ class TextEncoder(nn.Module):
         padding = (kernel_size - 1) // 2
         self.cnn = []
         for _ in range(depth):
-            self.cnn.append([
-                ConvWeighted(channels, channels, kernel_size=kernel_size, padding=padding),
-                nn.LayerNorm(channels),
-                actv,
-                nn.Dropout(0.2),
-            ])
+            self.cnn.append(
+                [
+                    ConvWeighted(
+                        channels, channels, kernel_size=kernel_size, padding=padding
+                    ),
+                    nn.LayerNorm(channels),
+                    actv,
+                    nn.Dropout(0.2),
+                ]
+            )
         # MLX doesn't have built-in LSTM, so we'll implement a simplified version
-        self.lstm = LSTM(channels, channels//2)
+        self.lstm = LSTM(channels, channels // 2)
 
     def __call__(self, x, input_lengths, m):
         x = self.embedding(x)
@@ -42,11 +48,14 @@ class TextEncoder(nn.Module):
             for layer in conv:
                 if isinstance(layer, (ConvWeighted, nn.LayerNorm)):
                     x = x.swapaxes(2, 1)
-                    x = layer(x, mx.conv1d) if isinstance(layer, ConvWeighted) else layer(x)
+                    x = (
+                        layer(x, mx.conv1d)
+                        if isinstance(layer, ConvWeighted)
+                        else layer(x)
+                    )
                     x = x.swapaxes(2, 1)
                 else:
                     x = layer(x)
-
 
                 x = mx.where(m, 0.0, x)
 
@@ -54,9 +63,10 @@ class TextEncoder(nn.Module):
         x, _ = self.lstm(x)
         x = x.swapaxes(2, 1)
         x_pad = mx.zeros([x.shape[0], x.shape[1], m.shape[-1]])
-        x_pad[:, :, :x.shape[-1]] = x
+        x_pad[:, :, : x.shape[-1]] = x
         x = mx.where(m, 0.0, x_pad)
         return x
+
 
 class AdaLayerNorm(nn.Module):
     # Works fine in MLX
@@ -86,7 +96,7 @@ class LSTM(nn.Module):
         input_size: int,
         hidden_size: int,
         bias: bool = True,
-        batch_first: bool = True
+        batch_first: bool = True,
     ):
         super().__init__()
 
@@ -143,7 +153,9 @@ class LSTM(nn.Module):
         """Process sequence in forward direction"""
         # Pre-compute input projections
         if self.bias_ih_forward is not None and self.bias_hh_forward is not None:
-            x_proj = mx.addmm(self.bias_ih_forward + self.bias_hh_forward, x, self.Wx_forward.T)
+            x_proj = mx.addmm(
+                self.bias_ih_forward + self.bias_hh_forward, x, self.Wx_forward.T
+            )
         else:
             x_proj = x @ self.Wx_forward.T
 
@@ -185,7 +197,9 @@ class LSTM(nn.Module):
         """Process sequence in backward direction"""
         # Pre-compute input projections
         if self.bias_ih_backward is not None and self.bias_hh_backward is not None:
-            x_proj = mx.addmm(self.bias_ih_backward + self.bias_hh_backward, x, self.Wx_backward.T)
+            x_proj = mx.addmm(
+                self.bias_ih_backward + self.bias_hh_backward, x, self.Wx_backward.T
+            )
         else:
             x_proj = x @ self.Wx_backward.T
 
@@ -230,7 +244,7 @@ class LSTM(nn.Module):
         hidden_forward=None,
         cell_forward=None,
         hidden_backward=None,
-        cell_backward=None
+        cell_backward=None,
     ):
         """
         Process input sequence in both directions and concatenate the results.
@@ -249,7 +263,7 @@ class LSTM(nn.Module):
         """
 
         if x.ndim == 2:
-            x = mx.expand_dims(x, axis=0) # (1, seq_len, input_size)
+            x = mx.expand_dims(x, axis=0)  # (1, seq_len, input_size)
 
         # Forward direction
         forward_hidden, forward_cell = self._forward_direction(
@@ -261,14 +275,14 @@ class LSTM(nn.Module):
             x, hidden_backward, cell_backward
         )
 
-
         # Concatenate outputs along the feature dimension
         output = mx.concatenate([forward_hidden, backward_hidden], axis=-1)
 
-
         # Return combined output and final states for both directions
-        return output, ((forward_hidden[..., -1, :], forward_cell[..., -1, :]),
-                        (backward_hidden[..., 0, :], backward_cell[..., 0, :]))
+        return output, (
+            (forward_hidden[..., -1, :], forward_cell[..., -1, :]),
+            (backward_hidden[..., 0, :], backward_cell[..., 0, :]),
+        )
 
 
 class ProsodyPredictor(nn.Module):
@@ -283,15 +297,45 @@ class ProsodyPredictor(nn.Module):
 
         # F0 and N blocks
         self.F0 = [
-            AdainResBlk1d(d_hid, d_hid, style_dim, dropout_p=dropout, conv_type=mx.conv1d),
-            AdainResBlk1d(d_hid, d_hid // 2, style_dim, upsample=True, dropout_p=dropout, conv_type=mx.conv1d),
-            AdainResBlk1d(d_hid // 2, d_hid // 2, style_dim, dropout_p=dropout, conv_type=mx.conv1d)
+            AdainResBlk1d(
+                d_hid, d_hid, style_dim, dropout_p=dropout, conv_type=mx.conv1d
+            ),
+            AdainResBlk1d(
+                d_hid,
+                d_hid // 2,
+                style_dim,
+                upsample=True,
+                dropout_p=dropout,
+                conv_type=mx.conv1d,
+            ),
+            AdainResBlk1d(
+                d_hid // 2,
+                d_hid // 2,
+                style_dim,
+                dropout_p=dropout,
+                conv_type=mx.conv1d,
+            ),
         ]
 
         self.N = [
-            AdainResBlk1d(d_hid, d_hid, style_dim, dropout_p=dropout, conv_type=mx.conv1d),
-            AdainResBlk1d(d_hid, d_hid // 2, style_dim, upsample=True, dropout_p=dropout, conv_type=mx.conv1d),
-            AdainResBlk1d(d_hid // 2, d_hid // 2, style_dim, dropout_p=dropout, conv_type=mx.conv1d)
+            AdainResBlk1d(
+                d_hid, d_hid, style_dim, dropout_p=dropout, conv_type=mx.conv1d
+            ),
+            AdainResBlk1d(
+                d_hid,
+                d_hid // 2,
+                style_dim,
+                upsample=True,
+                dropout_p=dropout,
+                conv_type=mx.conv1d,
+            ),
+            AdainResBlk1d(
+                d_hid // 2,
+                d_hid // 2,
+                style_dim,
+                dropout_p=dropout,
+                conv_type=mx.conv1d,
+            ),
         ]
 
         self.F0_proj = nn.Conv1d(d_hid // 2, 1, 1, padding=0)
@@ -299,7 +343,7 @@ class ProsodyPredictor(nn.Module):
 
     def __call__(self, texts, style, text_lengths, alignment, m):
         d = self.text_encoder(texts, style, text_lengths, m)
-        x, _= self.lstm(d, text_lengths)
+        x, _ = self.lstm(d, text_lengths)
 
         # Apply dropout during inference
         x = mx.dropout(x, p=0.5)
@@ -311,7 +355,7 @@ class ProsodyPredictor(nn.Module):
     def F0Ntrain(self, x, s):
         x = mx.array(x)
         s = mx.array(s)
-        x, _= self.shared(mx.transpose(x, (0, 2, 1)))
+        x, _ = self.shared(mx.transpose(x, (0, 2, 1)))
 
         # F0 prediction
         F0 = mx.transpose(x, (0, 2, 1))
@@ -338,10 +382,9 @@ class DurationEncoder(nn.Module):
         super().__init__()
         self.lstms = []
         for _ in range(nlayers):
-            self.lstms.extend([
-                LSTM(d_model + sty_dim, d_model // 2),
-                AdaLayerNorm(sty_dim, d_model)
-            ])
+            self.lstms.extend(
+                [LSTM(d_model + sty_dim, d_model // 2), AdaLayerNorm(sty_dim, d_model)]
+            )
         self.dropout = dropout
         self.d_model = d_model
         self.sty_dim = sty_dim
@@ -353,7 +396,6 @@ class DurationEncoder(nn.Module):
         x = mx.where(m[..., None].transpose(1, 0, 2), 0.0, x)
         x = x.transpose(1, 2, 0)
 
-
         for block in self.lstms:
             if isinstance(block, AdaLayerNorm):
                 x = block(x.transpose(0, 2, 1), style).transpose(0, 2, 1)
@@ -364,15 +406,13 @@ class DurationEncoder(nn.Module):
                 x, _ = block(x)
                 x = x.transpose(0, 2, 1)
                 x_pad = mx.zeros([x.shape[0], x.shape[1], m.shape[-1]])
-                x_pad[:, :, :x.shape[-1]] = x
+                x_pad[:, :, : x.shape[-1]] = x
                 x = x_pad
         return x.transpose(0, 2, 1)
 
 
-
 # https://github.com/yl4579/StyleTTS2/blob/main/Utils/PLBERT/util.py
 # TODO: Implement this in MLX
-
 
 
 @dataclass
@@ -382,7 +422,7 @@ class AlbertModelArgs(BaseModelArgs):
     hidden_size: int
     intermediate_size: int
     max_position_embeddings: int
-    model_type: str = 'albert'
+    model_type: str = "albert"
     embedding_size: int = 128
     inner_group_num: int = 1
     num_hidden_groups: int = 1
@@ -491,7 +531,6 @@ class AlbertSelfOutput(nn.Module):
         return hidden_states
 
 
-
 class AlbertIntermediate(nn.Module):
     def __init__(self, config: AlbertModelArgs):
         super().__init__()
@@ -524,7 +563,9 @@ class AlbertLayer(nn.Module):
         self.attention = AlbertSelfAttention(config)
 
         self.seq_len_dim = 1
-        self.full_layer_layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.full_layer_layer_norm = nn.LayerNorm(
+            config.hidden_size, eps=config.layer_norm_eps
+        )
         self.ffn = nn.Linear(config.hidden_size, config.intermediate_size)
         self.ffn_output = nn.Linear(config.intermediate_size, config.hidden_size)
         self.activation = nn.GELU()
@@ -541,10 +582,13 @@ class AlbertLayer(nn.Module):
         ffn_output = self.ffn_output(ffn_output)
         return ffn_output
 
+
 class AlbertLayerGroup(nn.Module):
     def __init__(self, config: AlbertModelArgs):
         super().__init__()
-        self.albert_layers = [AlbertLayer(config) for _ in range(config.inner_group_num)]
+        self.albert_layers = [
+            AlbertLayer(config) for _ in range(config.inner_group_num)
+        ]
 
     def __call__(self, hidden_states, attention_mask=None):
         for layer_module in self.albert_layers:
@@ -556,25 +600,31 @@ class AlbertEncoder(nn.Module):
     def __init__(self, config: AlbertModelArgs):
         super().__init__()
         self.config = config
-        self.embedding_hidden_mapping_in = nn.Linear(config.embedding_size, config.hidden_size)
-        self.albert_layer_groups = [AlbertLayerGroup(config) for _ in range(config.num_hidden_groups)]
+        self.embedding_hidden_mapping_in = nn.Linear(
+            config.embedding_size, config.hidden_size
+        )
+        self.albert_layer_groups = [
+            AlbertLayerGroup(config) for _ in range(config.num_hidden_groups)
+        ]
 
     def __call__(self, hidden_states, attention_mask=None):
         hidden_states = self.embedding_hidden_mapping_in(hidden_states)
         for i in range(self.config.num_hidden_layers):
             # Number of layers in a hidden group
-            layers_per_group = int(self.config.num_hidden_layers / self.config.num_hidden_groups)
+            layers_per_group = int(
+                self.config.num_hidden_layers / self.config.num_hidden_groups
+            )
 
             # Index of the hidden group
-            group_idx = int(i / (self.config.num_hidden_layers / self.config.num_hidden_groups))
+            group_idx = int(
+                i / (self.config.num_hidden_layers / self.config.num_hidden_groups)
+            )
 
             layer_group_output = self.albert_layer_groups[group_idx](
-                hidden_states,
-                attention_mask
+                hidden_states, attention_mask
             )
             hidden_states = layer_group_output
         return hidden_states
-
 
 
 class CustomAlbert(nn.Module):
