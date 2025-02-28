@@ -7,7 +7,7 @@ from setuptools import find_packages, setup
 root_dir = Path(__file__).parent
 
 # Add the package directory to the Python path
-package_dir = root_dir
+package_dir = root_dir / "mlx_audio"
 sys.path.append(str(package_dir))
 
 # Read the requirements from the requirements.txt file
@@ -39,7 +39,7 @@ setup(
     python_requires=">=3.8",
     entry_points={
         "console_scripts": [
-            "tts.generate = tts.generate:main",
+            "mlx_audio.tts.generate = mlx_audio.tts.generate:main",
         ]
     },
 )
