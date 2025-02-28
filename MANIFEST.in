@@ -1,2 +1,2 @@
 include ./requirements.txt
-recursive-include mlx_audio/*.py
+recursive-include mlx_audio/ *.py
