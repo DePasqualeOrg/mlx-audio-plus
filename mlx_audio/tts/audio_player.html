@@ -184,6 +184,16 @@
             </div>
             
             <div class="form-group">
+                <label for="model">Model:</label>
+                <select id="model">
+                    <option value="mlx-community/Kokoro-82M-4bit">Kokoro 82M 4bit</option>
+                    <option value="mlx-community/Kokoro-82M-6bit">Kokoro 82M 6bit</option>
+                    <option value="mlx-community/Kokoro-82M-8bit">Kokoro 82M 8bit</option>
+                    <option value="mlx-community/Kokoro-82M-bf16">Kokoro 82M bf16</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
                 <label for="speed">Speech Speed:</label>
                 <div class="slider-container">
                     <div class="slider-labels">
@@ -226,6 +236,7 @@
         // TTS elements
         const textInput = document.getElementById('text');
         const voiceSelect = document.getElementById('voice');
+        const modelSelect = document.getElementById('model');
         const speedInput = document.getElementById('speed');
         const speedValue = document.getElementById('speed-value');
         const generateBtn = document.getElementById('generateBtn');
@@ -332,6 +343,7 @@
         generateBtn.addEventListener('click', function() {
             const text = textInput.value;
             const voice = voiceSelect.value;
+            const model = modelSelect.value;
             const speed = speedInput.value;
             
             if (!text.trim()) {
@@ -347,6 +359,7 @@
             const formData = new FormData();
             formData.append('text', text);
             formData.append('voice', voice);
+            formData.append('model', model);
             formData.append('speed', speed);
             
             // Send request to server
