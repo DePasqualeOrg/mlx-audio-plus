@@ -50,6 +50,8 @@ def parse_args():
 def main():
     args = parse_args()
     try:
+        player = AudioPlayer() if args.play else None
+
         model = load_model(model_path=args.model)
         print(
             f"\n\033[94mModel:\033[0m {args.model}\n"
@@ -72,7 +74,9 @@ def main():
 
         audio_list = []
         for i, result in enumerate(results):
-            if args.join_audio or args.play:
+            if args.play:
+                player.queue_audio(result.audio)
+            if args.join_audio:
                 audio_list.append(result.audio)
             else:
                 sf.write(f"{args.file_prefix}_{i:03d}.wav", result.audio, 24000)
@@ -99,10 +103,6 @@ def main():
             sf.write(f"{args.file_prefix}.wav", audio, 24000)
 
         if args.play:
-            audio = mx.concatenate(audio_list, axis=0)
-
-            player = AudioPlayer()
-            player.queue_audio(audio)
             player.wait_for_drain()
             player.stop()
     except ImportError as e:
