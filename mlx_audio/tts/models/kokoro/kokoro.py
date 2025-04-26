@@ -64,7 +64,7 @@ class ModelConfig(BaseModelArgs):
 
 class Model(nn.Module):
     """
-    KokoroModel is a torch.nn.Module with 2 main responsibilities:
+    KokoroModel is a mlx.nn.Module with 2 main responsibilities:
     1. Init weights, downloading config.json + model.pth from HF if needed
     2. forward(phonemes: str, ref_s: FloatTensor) -> (audio: FloatTensor)
 
