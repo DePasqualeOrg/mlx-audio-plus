@@ -9,20 +9,64 @@ from typing import List, Optional, Tuple, Union
 
 import mlx.core as mx
 import mlx.nn as nn
+from huggingface_hub import snapshot_download
 from mlx.utils import tree_flatten
 from mlx_lm.convert import mixed_quant_predicate_builder
 from mlx_lm.utils import (
+    ModelNotFoundError,
     dequantize_model,
-    get_model_path,
     quantize_model,
     save_config,
     save_weights,
 )
 from transformers import AutoConfig
 
-MODEL_REMAPPING = {"outetts": "outetts", "sam": "sesame"}
+MODEL_REMAPPING = {"outetts": "outetts", "spark": "spark", "sam": "sesame"}
 MAX_FILE_SIZE_GB = 5
 MODEL_CONVERSION_DTYPES = ["float16", "bfloat16", "float32"]
+
+
+def get_model_path(path_or_hf_repo: str, revision: Optional[str] = None) -> Path:
+    """
+    Ensures the model is available locally. If the path does not exist locally,
+    it is downloaded from the Hugging Face Hub.
+
+    Args:
+        path_or_hf_repo (str): The local path or Hugging Face repository ID of the model.
+        revision (str, optional): A revision id which can be a branch name, a tag, or a commit hash.
+
+    Returns:
+        Path: The path to the model.
+    """
+    model_path = Path(path_or_hf_repo)
+
+    if not model_path.exists():
+        try:
+            model_path = Path(
+                snapshot_download(
+                    path_or_hf_repo,
+                    revision=revision,
+                    allow_patterns=[
+                        "*.json",
+                        "*.safetensors",
+                        "*.py",
+                        "*.model",
+                        "*.tiktoken",
+                        "*.txt",
+                        "*.jsonl",
+                        "*.yaml",
+                    ],
+                )
+            )
+        except:
+            raise ModelNotFoundError(
+                f"Model not found for path or HF repo: {path_or_hf_repo}.\n"
+                "Please make sure you specified the local path or Hugging Face"
+                " repo id correctly.\nIf you are trying to access a private or"
+                " gated Hugging Face repo, make sure you are authenticated:\n"
+                "https://huggingface.co/docs/huggingface_hub/en/guides/cli#huggingface-cli-login"
+            ) from None
+    return model_path
 
 
 # Get a list of all available model types from the models directory
@@ -157,6 +201,11 @@ def load_model(
 
     weight_files = glob.glob(str(model_path / "*.safetensors"))
     if not weight_files:
+        # Check in LLM directory if no safetensors found in the main directory
+        # For Spark model
+        weight_files = glob.glob(str(model_path / "LLM" / "*.safetensors"))
+
+    if not weight_files:
         logging.error(f"No safetensors found in {model_path}")
         message = f"""
 No safetensors found in {model_path}
@@ -192,6 +241,10 @@ python -m mlx_audio.tts.convert --hf-path <local_dir> --mlx-path <mlx_dir>
         if hasattr(model_class, "ModelConfig")
         else config
     )
+
+    if model_config is not None and hasattr(model_config, "model_path"):
+        # For Spark model
+        model_config.model_path = model_path
 
     model = model_class.Model(model_config)
     quantization = config.get("quantization", None)

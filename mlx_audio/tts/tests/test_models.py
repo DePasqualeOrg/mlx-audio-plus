@@ -778,5 +778,74 @@ class TestDiaModel(unittest.TestCase):
         self.assertIsInstance(model, Model)
 
 
+class TestSparkTTSModel(unittest.TestCase):
+    @property
+    def _default_config(self):
+        return {
+            "model_path": "/fake/model/path",
+            "sample_rate": 16000,
+            "bos_token_id": 151643,
+            "eos_token_id": 151645,
+            "hidden_act": "silu",
+            "hidden_size": 896,
+            "initializer_range": 0.02,
+            "intermediate_size": 4864,
+            "max_position_embeddings": 32768,
+            "max_window_layers": 21,
+            "model_type": "qwen2",
+            "num_attention_heads": 14,
+            "num_hidden_layers": 24,
+            "num_key_value_heads": 2,
+            "rms_norm_eps": 1e-06,
+            "rope_theta": 1000000.0,
+            "sliding_window": 32768,
+            "tie_word_embeddings": True,
+            "torch_dtype": "bfloat16",
+            "transformers_version": "4.43.1",
+            "use_sliding_window": False,
+            "vocab_size": 166000,
+            "rope_traditional": False,
+            "rope_scaling": None,
+        }
+
+    @patch("mlx_audio.tts.models.spark.spark.load_tokenizer")
+    @patch("mlx_audio.tts.models.spark.spark.BiCodecTokenizer")
+    @patch("mlx_audio.tts.models.spark.spark.Qwen2Model")
+    def test_init(
+        self,
+        mock_qwen2_model,
+        mock_bicodec_tokenizer,
+        mock_load_tokenizer,
+    ):
+        """Test SparkTTSModel initialization."""
+        from pathlib import Path
+
+        from mlx_audio.tts.models.spark.spark import Model, ModelConfig
+
+        # Mock return values for patched functions
+        mock_load_tokenizer.return_value = MagicMock()
+        mock_bicodec_tokenizer.return_value = MagicMock()
+        mock_qwen2_model.return_value = MagicMock()
+
+        # Create a config instance
+        config = ModelConfig(**self._default_config)
+        config.model_path = Path("/fake/model/path")
+
+        # Initialize the model
+        model = Model(config)
+
+        # Check that the model was initialized correctly
+        self.assertIsInstance(model, Model)
+
+        # Verify the tokenizer was loaded correctly
+        mock_load_tokenizer.assert_called_once_with(
+            config.model_path, eos_token_ids=config.eos_token_id
+        )
+        mock_bicodec_tokenizer.assert_called_once_with(config.model_path)
+
+        # Verify the model was initialized correctly
+        mock_qwen2_model.assert_called_once_with(config)
+
+
 if __name__ == "__main__":
     unittest.main()
