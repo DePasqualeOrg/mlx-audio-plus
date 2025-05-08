@@ -86,6 +86,7 @@ class Model(nn.Module):
     def sanitize(self, weights):
         return self.model.sanitize(weights)
 
+    @property
     def layers(self):
         return self.model.layers
 
