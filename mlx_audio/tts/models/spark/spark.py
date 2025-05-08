@@ -78,10 +78,22 @@ class Model(nn.Module):
         self._audio_tokenizer = BiCodecTokenizer(model_dir)
 
     def load_weights(self, weights, strict=True):
-        self.model.load_weights(weights, strict=True)
+        self.model.load_weights(weights, strict=strict)
+
+    def parameters(self):
+        return self.model.parameters()
 
     def sanitize(self, weights):
         return self.model.sanitize(weights)
+
+    def layers(self):
+        return self.model.layers
+
+    def model_quant_predicate(self, p, m, config):
+        """
+        Model modules to skip during quantization
+        """
+        return not p.startswith("_audio_tokenizer")
 
     def process_prompt(
         self,
@@ -305,8 +317,8 @@ class Model(nn.Module):
 
             # Convert semantic tokens back to waveform
             audio = self._audio_tokenizer.detokenize(
-                global_token_ids,
-                pred_semantic_ids,
+                global_token_ids.astype(mx.int32),
+                pred_semantic_ids.astype(mx.int32),
             )
 
             audio_samples = len(audio)

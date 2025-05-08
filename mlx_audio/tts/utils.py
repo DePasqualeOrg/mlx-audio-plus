@@ -396,8 +396,6 @@ def convert(
     if quantize:
         print("[INFO] Quantizing")
         model.load_weights(list(weights.items()))
-        if hasattr(model, "skip_quantize"):
-            model.skip_quantize()
         weights, config = quantize_model(
             model, config, q_group_size, q_bits, quant_predicate=quant_predicate
         )
@@ -410,14 +408,26 @@ def convert(
     if isinstance(mlx_path, str):
         mlx_path = Path(mlx_path)
 
-    del model
-    save_weights(mlx_path, weights, donate_weights=True)
+    # Ensure the destination directory for MLX model exists before copying files
+    mlx_path.mkdir(parents=True, exist_ok=True)
 
     # Copy Python and JSON files from the model path to the MLX path
-    for pattern in ["*.py", "*.json", "*.wav", "*.pt"]:
+    for pattern in ["*.py", "*.json", "*.wav", "*.pt", "*.safetensors", "*.yaml"]:
         files = glob.glob(str(model_path / pattern))
         for file in files:
             shutil.copy(file, mlx_path)
+
+        # Check files in subdirectories up to two levels deep
+        subdir_files = glob.glob(str(model_path / "**" / pattern), recursive=True)
+        for file in subdir_files:
+            rel_path = Path(file).relative_to(model_path)
+            # Create subdirectories if they don't exist
+            dest_dir = mlx_path / rel_path.parent
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy(file, dest_dir)
+
+    del model
+    save_weights(mlx_path, weights, donate_weights=True)
 
     save_config(config, config_path=mlx_path / "config.json")
 
