@@ -60,7 +60,7 @@ def generate_audio(
     - lang_code (str): The language code.
     - ref_audio (mx.array): Reference audio you would like to clone the voice from.
     - ref_text (str): Caption for reference audio.
-    stt_model (str): A mlx whisper model to use to transcribe.
+    - stt_model (str): A mlx whisper model to use to transcribe.
     - file_prefix (str): The output file path without extension.
     - audio_format (str): Output audio format (e.g., "wav", "flac").
     - sample_rate (int): Sampling rate in Hz.
@@ -81,10 +81,10 @@ def generate_audio(
             ref_audio = load_audio(ref_audio, sample_rate=sample_rate)
             if not ref_text:
                 print("Ref_text not found. Transcribing ref_audio...")
-                from mlx_audio.stt import Whisper
+                from mlx_audio.stt.models.whisper import Model as Whisper
 
                 stt_model = Whisper.from_pretrained(path_or_hf_repo=stt_model)
-                ref_text = stt_model.generate(ref_audio)["text"]
+                ref_text = stt_model.generate(ref_audio).text
                 print("Ref_text", ref_text)
 
         # Load AudioPlayer

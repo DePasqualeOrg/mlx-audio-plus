@@ -6,8 +6,9 @@ from typing import Optional, Union
 
 import mlx.core as mx
 import numpy as np
-import soundfile as sf
 from scipy import signal
+
+from mlx_audio.stt.utils import load_audio
 
 # hard-coded audio hyperparameters
 SAMPLE_RATE = 16000
@@ -20,36 +21,6 @@ N_FRAMES = N_SAMPLES // HOP_LENGTH  # 3000 frames in a mel spectrogram input
 N_SAMPLES_PER_TOKEN = HOP_LENGTH * 2  # the initial convolutions has stride 2
 FRAMES_PER_SECOND = SAMPLE_RATE // HOP_LENGTH  # 10ms per audio frame
 TOKENS_PER_SECOND = SAMPLE_RATE // N_SAMPLES_PER_TOKEN  # 20ms per audio token
-
-
-def resample_audio(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
-    gcd = np.gcd(orig_sr, target_sr)
-    up = target_sr // gcd
-    down = orig_sr // gcd
-    resampled = signal.resample_poly(audio, up, down, padtype="edge")
-    return resampled
-
-
-def load_audio(file: str = Optional[str], sr: int = SAMPLE_RATE, from_stdin=False):
-    """
-    Open an audio file and read as mono waveform, resampling as necessary
-
-    Parameters
-    ----------
-    file: str
-        The audio file to open
-
-    sr: int
-        The sample rate to resample the audio if necessary
-
-    Returns
-    -------
-    A NumPy array containing the audio waveform, in float32 dtype.
-    """
-    audio, sample_rate = sf.read(file, always_2d=True)
-    if sample_rate != sr:
-        audio = resample_audio(audio, sample_rate, sr)
-    return mx.array(audio, dtype=mx.float32).mean(axis=1)
 
 
 def pad_or_trim(array, length: int = N_SAMPLES, *, axis: int = -1):
