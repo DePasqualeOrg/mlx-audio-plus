@@ -3,9 +3,9 @@ from typing import Any, Dict, Tuple
 
 import mlx.core as mx
 import numpy as np
-from transformers import Wav2Vec2Model
 
 from mlx_audio.stt.models.wav2vec.feature_extractor import Wav2Vec2FeatureExtractor
+from mlx_audio.stt.models.wav2vec.wav2vec import Wav2Vec2Model
 
 from .bicodec import BiCodec
 from .utils.audio import load_audio
@@ -72,7 +72,7 @@ class BiCodecTokenizer:
             return_tensors="mx",
             padding=True,
             output_hidden_states=True,
-        ).input_values
+        )["input_values"]
         feat = self.feature_extractor(inputs)
         feats_mix = (
             feat.hidden_states[11] + feat.hidden_states[14] + feat.hidden_states[16]
