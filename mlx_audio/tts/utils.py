@@ -12,13 +12,7 @@ import mlx.nn as nn
 from huggingface_hub import snapshot_download
 from mlx.utils import tree_flatten
 from mlx_lm.convert import mixed_quant_predicate_builder
-from mlx_lm.utils import (
-    ModelNotFoundError,
-    dequantize_model,
-    quantize_model,
-    save_config,
-    save_weights,
-)
+from mlx_lm.utils import dequantize_model, quantize_model, save_config, save_weights
 from transformers import AutoConfig
 
 MODEL_REMAPPING = {"outetts": "outetts", "spark": "spark", "sam": "sesame"}
@@ -41,31 +35,23 @@ def get_model_path(path_or_hf_repo: str, revision: Optional[str] = None) -> Path
     model_path = Path(path_or_hf_repo)
 
     if not model_path.exists():
-        try:
-            model_path = Path(
-                snapshot_download(
-                    path_or_hf_repo,
-                    revision=revision,
-                    allow_patterns=[
-                        "*.json",
-                        "*.safetensors",
-                        "*.py",
-                        "*.model",
-                        "*.tiktoken",
-                        "*.txt",
-                        "*.jsonl",
-                        "*.yaml",
-                    ],
-                )
+        model_path = Path(
+            snapshot_download(
+                path_or_hf_repo,
+                revision=revision,
+                allow_patterns=[
+                    "*.json",
+                    "*.safetensors",
+                    "*.py",
+                    "*.model",
+                    "*.tiktoken",
+                    "*.txt",
+                    "*.jsonl",
+                    "*.yaml",
+                ],
             )
-        except:
-            raise ModelNotFoundError(
-                f"Model not found for path or HF repo: {path_or_hf_repo}.\n"
-                "Please make sure you specified the local path or Hugging Face"
-                " repo id correctly.\nIf you are trying to access a private or"
-                " gated Hugging Face repo, make sure you are authenticated:\n"
-                "https://huggingface.co/docs/huggingface_hub/en/guides/cli#huggingface-cli-login"
-            ) from None
+        )
+
     return model_path
 
 
