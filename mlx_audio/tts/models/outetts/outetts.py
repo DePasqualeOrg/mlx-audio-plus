@@ -22,12 +22,17 @@ class ModelConfig(LlamaModelConfig):
 
 
 class Model(LlamaModel):
+
     def sanitize(self, weights):
         return weights
 
     @property
     def layers(self):
         return self.model.layers
+
+    @property
+    def sample_rate(self):
+        return self.config.sample_rate
 
     def generate(
         self,
@@ -109,7 +114,11 @@ class Model(LlamaModel):
 
             token_count = input_ids.shape[1] if input_ids is not None else 0
 
-            sample_rate = 24000
+            sample_rate = (
+                self.config.sample_rate
+                if kwargs.get("sample_rate") is None
+                else kwargs.get("sample_rate")
+            )
             audio_duration_seconds = samples / sample_rate
 
             elapsed_time = time_end - time_start
