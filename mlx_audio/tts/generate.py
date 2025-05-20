@@ -266,6 +266,10 @@ def generate_audio(
                 ref_text = stt_model.generate(ref_audio).text
                 print("Ref_text", ref_text)
 
+                # clear memory
+                del stt_model
+                mx.clear_cache()
+
         # Load AudioPlayer
         player = AudioPlayer(sample_rate=model.sample_rate) if play else None
 
