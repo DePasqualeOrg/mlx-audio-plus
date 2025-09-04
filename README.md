@@ -218,6 +218,57 @@ mx.save_safetensors("./8bit/kokoro-v1_0.safetensors", weights, metadata={"format
   - FastAPI
   - Uvicorn
   
+## Swift Integration
+
+This repo also ships a Swift package for on-device TTS using Apple's MLX framework on macOS and iOS.
+
+### Supported Platforms
+- **macOS**: 14.0+
+- **iOS**: 16.0+
+
+### Adding the Swift Package Dependency
+
+#### Via Xcode (Recommended)
+1. Open your Xcode project
+2. Navigate to **File** → **Add Package Dependencies...**
+3. In the search bar, enter the package repository URL:
+   ```
+   https://github.com/Blaizzy/mlx-audio.git
+   ```
+4. Select the package and choose the version you want to use
+5. Add the **`mlx-swift-audio`** product to your target
+
+#### Via Package.swift
+Add the following dependency to your `Package.swift` file:
+
+```swift
+dependencies: [
+    .package(url: "https://github.com/Blaizzy/mlx-audio.git", from: "0.2.5")
+],
+targets: [
+    .target(
+        name: "YourTarget",
+        dependencies: [
+            .product(name: "mlx-swift-audio", package: "mlx-audio")
+        ]
+    )
+]
+```
+
+### Usage
+After adding the dependency, import and use the module:
+
+```swift
+import Swift_TTS
+
+// Create a session with a built-in voice
+let session = try await SesameSession(voice: .conversationalA)
+
+// Generate audio
+let result = try await session.generate(for: "Your text here")
+print("Generated audio at \(result.sampleRate) Hz")
+```
+
 ## License
 
 [MIT License](LICENSE)
