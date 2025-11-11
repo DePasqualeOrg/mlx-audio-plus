@@ -2,9 +2,10 @@ import argparse
 import os
 import random
 import sys
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import mlx.core as mx
+import mlx.nn as nn
 import numpy as np
 import soundfile as sf
 from numpy.lib.stride_tricks import sliding_window_view
@@ -202,14 +203,14 @@ def hertz_to_mel(pitch: float) -> float:
 
 def generate_audio(
     text: str,
-    model_path: str = "prince-canuma/Kokoro-82M",
+    model: Optional[Union[str, nn.Module]] = "prince-canuma/Kokoro-82M",
     max_tokens: int = 1200,
     voice: str = "af_heart",
     speed: float = 1.0,
     lang_code: str = "a",
     ref_audio: Optional[str] = None,
     ref_text: Optional[str] = None,
-    stt_model: str = "mlx-community/whisper-large-v3-turbo",
+    stt_model: Optional[Union[str, nn.Module]] = "mlx-community/whisper-large-v3-turbo",
     file_prefix: str = "audio",
     audio_format: str = "wav",
     join_audio: bool = False,
@@ -232,20 +233,31 @@ def generate_audio(
     - lang_code (str): The language code.
     - ref_audio (mx.array): Reference audio you would like to clone the voice from.
     - ref_text (str): Caption for reference audio.
-    - stt_model (str): A mlx whisper model to use to transcribe.
+    - stt_model_path (str): A mlx whisper model to use to transcribe.
     - file_prefix (str): The output file path without extension.
     - audio_format (str): Output audio format (e.g., "wav", "flac").
     - join_audio (bool): Whether to join multiple audio files into one.
     - play (bool): Whether to play the generated audio.
     - verbose (bool): Whether to print status messages.
+    - model (object): A already loaded model.
+    - stt_model (object): A already loaded stt model.
     Returns:
     - None: The function writes the generated audio to a file.
     """
     try:
         play = play or stream
 
-        # Load model
-        model = load_model(model_path=model_path)
+        if model is None:
+            raise ValueError("Model path or model instance must be provided.")
+
+        if stt_model is None and (ref_audio and ref_text is None):
+            raise ValueError(
+                "STT model path or model instance must be provided when ref_text is given."
+            )
+
+        if isinstance(model, str):
+            # Load model
+            model = load_model(model_path=model)
 
         # Load reference audio for voice matching if specified
         if ref_audio:
@@ -266,19 +278,21 @@ def generate_audio(
                     print("Ref_text not found. Transcribing ref_audio...")
                     from mlx_audio.stt.models.whisper import Model as Whisper
 
-                    stt_model = Whisper.from_pretrained(path_or_hf_repo=stt_model)
+                    stt_model = (
+                        Whisper.from_pretrained(path_or_hf_repo=stt_model)
+                        if isinstance(stt_model, str)
+                        else stt_model
+                    )
                     ref_text = stt_model.generate(ref_audio).text
-                    print("Ref_text", ref_text)
 
-                    # clear memory
                     del stt_model
                     mx.clear_cache()
+                    print(f"\033[94mRef_text:\033[0m {ref_text}")
 
         # Load AudioPlayer
         player = AudioPlayer(sample_rate=model.sample_rate) if play else None
 
         print(
-            f"\n\033[94mModel:\033[0m {model_path}\n"
             f"\033[94mText:\033[0m {text}\n"
             f"\033[94mVoice:\033[0m {voice}\n"
             f"\033[94mSpeed:\033[0m {speed}x\n"
@@ -445,7 +459,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    generate_audio(model_path=args.model, **vars(args))
+    generate_audio(**vars(args))
 
 
 if __name__ == "__main__":
