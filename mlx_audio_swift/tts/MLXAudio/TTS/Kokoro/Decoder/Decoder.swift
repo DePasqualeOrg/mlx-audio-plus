@@ -71,7 +71,7 @@ class Decoder {
   }
 
   func callAsFunction(asr: MLXArray, F0Curve: MLXArray, N: MLXArray, s: MLXArray) -> MLXArray {
-    BenchmarkTimer.shared.create(id: "Encode", parent: "Decoder")
+    Task { await BenchmarkTimer.shared.create(id: "Encode", parent: "Decoder") }
 
     let F0CurveSwapped = MLX.swappedAxes(F0Curve.reshaped([F0Curve.shape[0], 1, F0Curve.shape[1]]), 2, 1)
     let F0 = MLX.swappedAxes(F0Conv(F0CurveSwapped, conv: MLX.conv1d), 2, 1)
@@ -86,9 +86,9 @@ class Decoder {
     var res = true
 
     x.eval()
-    BenchmarkTimer.shared.stop(id: "Encode")
+    Task { await BenchmarkTimer.shared.stop(id: "Encode") }
 
-    BenchmarkTimer.shared.create(id: "Blocks", parent: "Decoder")
+    Task { await BenchmarkTimer.shared.create(id: "Blocks", parent: "Decoder") }
 
     for block in decode {
       if res {
@@ -102,7 +102,7 @@ class Decoder {
     }
 
     x.eval()
-    BenchmarkTimer.shared.stop(id: "Blocks")
+    Task { await BenchmarkTimer.shared.stop(id: "Blocks") }
 
     return generator(x, s, F0Curve)
   }

@@ -109,32 +109,6 @@ func mlxStft(
   return spec.transposed(1, 0)
 }
 
-class ThreadPool {
-  private let semaphore: DispatchSemaphore
-  private let queue: DispatchQueue
-  private let dispatchGroup: DispatchGroup
-
-  init(maxConcurrentTasks: Int) {
-    semaphore = DispatchSemaphore(value: maxConcurrentTasks)
-    queue = DispatchQueue(label: "com.threadpool.queue", qos: .userInteractive, attributes: .concurrent)
-    dispatchGroup = DispatchGroup()
-  }
-
-  func addTask(_ task: @escaping () -> Void) {
-    dispatchGroup.enter() // Register the task with the DispatchGroup
-    queue.async {
-      self.semaphore.wait()
-      task() // Run the task
-      self.semaphore.signal()
-      self.dispatchGroup.leave() // Mark this task as finished
-    }
-  }
-
-  func waitForAllTasks() {
-    dispatchGroup.wait() // Blocks until all tasks are complete
-    Log.tts.debug("All tasks are complete")
-  }
-}
 
 func mlxIstft(
   x: MLXArray,
@@ -142,7 +116,7 @@ func mlxIstft(
   winLength: Int? = nil,
   window: Any = "hann"
 ) -> MLXArray {
-  BenchmarkTimer.shared.create(id: "StartProcessing", parent: "Istft")
+  Task { await BenchmarkTimer.shared.create(id: "StartProcessing", parent: "Istft") }
 
   let winLen = winLength ?? ((x.shape[1] - 1) * 2)
   let hopLen = hopLength ?? (winLen / 4)
@@ -160,7 +134,7 @@ func mlxIstft(
   let totalWsquared = MLX.concatenated(Array(repeating: wSquared, count: t / winLen))
 
   xTransposed.eval()
-  BenchmarkTimer.shared.stop(id: "StartProcessing")
+  Task { await BenchmarkTimer.shared.stop(id: "StartProcessing") }
 
 //  let fft = BenchmarkTimer.shared.create(id: "FFT", parent: "Istft")!
 //  let overlap = BenchmarkTimer.shared.create(id: "Overlap", parent: "Istft")!
@@ -203,14 +177,14 @@ func mlxIstft(
 
 //  overlap.stop()
 
-  BenchmarkTimer.shared.create(id: "EndProcessing", parent: "Istft")
+  Task { await BenchmarkTimer.shared.create(id: "EndProcessing", parent: "Istft") }
 
   reconstructed =
     reconstructed[winLen / 2 ..< (reconstructed.shape[0] - winLen / 2)] /
     windowSum[winLen / 2 ..< (reconstructed.shape[0] - winLen / 2)]
   reconstructed.eval()
 
-  BenchmarkTimer.shared.stop(id: "EndProcessing")
+  Task { await BenchmarkTimer.shared.stop(id: "EndProcessing") }
 
   return reconstructed
 }
@@ -237,27 +211,24 @@ class MLXSTFT {
         audioArray = audioArray.expandedDimensions(axis: 0)
     }
 
-    let threadPool = ThreadPool(maxConcurrentTasks: 4)
-    var magnitudes: [MLXArray] = Array(repeating: MLXArray.zeros([1]), count: audioArray.shape[0])
-    var phases: [MLXArray] = Array(repeating: MLXArray.zeros([1]), count: audioArray.shape[0])
+    var magnitudes: [MLXArray] = []
+    var phases: [MLXArray] = []
 
-    for batchIdx in 0 ..< audioArray.shape[0] {
-        threadPool.addTask {
-            let stft = mlxStft(
-                x: audioArray[batchIdx],
-                nFft: self.filterLength,
-                hopLength: self.hopLength,
-                winLength: self.winLength,
-                window: self.window,
-                center: true,
-                padMode: "reflect"
-            )
-            magnitudes[batchIdx] = MLX.abs(stft)
-            phases[batchIdx] = MLX.atan2(stft.imaginaryPart(), stft.realPart())
-        }
+    // Process sequentially - MLX handles GPU parallelism internally
+    for batchIdx in 0..<audioArray.shape[0] {
+      let stft = mlxStft(
+        x: audioArray[batchIdx],
+        nFft: filterLength,
+        hopLength: hopLength,
+        winLength: winLength,
+        window: window,
+        center: true,
+        padMode: "reflect"
+      )
+      magnitudes.append(MLX.abs(stft))
+      phases.append(MLX.atan2(stft.imaginaryPart(), stft.realPart()))
     }
 
-    threadPool.waitForAllTasks()
     let magnitudesStacked = MLX.stacked(magnitudes, axis: 0)
     let phasesStacked = MLX.stacked(phases, axis: 0)
 

@@ -418,8 +418,8 @@ public final class MarvisModel: Module {
     private var backboneCausalMask: MLXArray? = nil
     private var decoderCausalMask: MLXArray? = nil
 
-    public var backboneCache: [KVCache]? = nil
-    public var decoderCache: [KVCache]? = nil
+    public var backboneCache: [TTSKVCache]? = nil
+    public var decoderCache: [TTSKVCache]? = nil
     public var cachesEnabled: Bool = false
 
     public init(config: MarvisModelArgs) throws {
@@ -484,8 +484,8 @@ public final class MarvisModel: Module {
             }
         }
         
-        backboneCache = (0..<backCfg.hiddenLayers).map { _ in KVCache(headDim: backCfg.resolvedHeadDimensions, nKVHeads: backCfg.kvHeads) }
-        decoderCache = (0..<decCfg.hiddenLayers).map { _ in KVCache(headDim: decCfg.resolvedHeadDimensions, nKVHeads: decCfg.kvHeads) }
+        backboneCache = (0..<backCfg.hiddenLayers).map { _ in TTSKVCache(headDim: backCfg.resolvedHeadDimensions, nKVHeads: backCfg.kvHeads) }
+        decoderCache = (0..<decCfg.hiddenLayers).map { _ in TTSKVCache(headDim: decCfg.resolvedHeadDimensions, nKVHeads: decCfg.kvHeads) }
         cachesEnabled = true
     }
 
@@ -535,7 +535,7 @@ public final class MarvisModel: Module {
                 fatalError("Failed to create LlamaConfiguration for decoder: \(error). Decoder flavor: \(decoderFlavor)")
             }
         }
-        decoderCache = (0..<decCfg.hiddenLayers).map { _ in KVCache(headDim: decCfg.resolvedHeadDimensions, nKVHeads: decCfg.kvHeads) }
+        decoderCache = (0..<decCfg.hiddenLayers).map { _ in TTSKVCache(headDim: decCfg.resolvedHeadDimensions, nKVHeads: decCfg.kvHeads) }
 
         let codeBooks = min(args.audioNumCodebooks, maxCodebooks)
         if codeBooks > 1 {

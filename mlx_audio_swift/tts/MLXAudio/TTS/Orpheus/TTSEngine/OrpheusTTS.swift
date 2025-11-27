@@ -4,7 +4,7 @@ import MLXNN
 import MLXRandom
 
 // Available voices for Orpheus
-public enum OrpheusVoice: String, CaseIterable {
+public enum OrpheusVoice: String, CaseIterable, Sendable {
     case tara = "tara" // Female, conversational, clear
     case leah = "leah" // Female, warm, gentle
     case jess = "jess" // Female, energetic, youthful
@@ -17,8 +17,8 @@ public enum OrpheusVoice: String, CaseIterable {
 
 // MARK: - Profiling Helper
 struct Profiler {
-    static var enabled: Bool = false // Set to true to enable profiling
-    
+    static let enabled: Bool = false
+
     static func time<T>(_ label: String, _ block: () throws -> T) rethrows -> T {
         guard enabled else { return try block() }
         
@@ -43,7 +43,7 @@ struct Profiler {
 }
 
 // Main class for Orpheus TTS
-public class OrpheusTTS {
+public actor OrpheusTTS {
     enum OrpheusTTSError: Error {
         case tooManyTokens
         case weightsNotAvailable
@@ -83,7 +83,7 @@ public class OrpheusTTS {
     public static func load(
         repoId: String = OrpheusWeightLoader.defaultRepoId,
         snacRepoId: String = SNACDecoder.defaultRepoId,
-        progressHandler: @escaping (Progress) -> Void = { _ in }
+        progressHandler: @escaping @Sendable (Progress) -> Void = { _ in }
     ) async throws -> OrpheusTTS {
         // Load model weights from Hub
         let loadedWeights = try await Profiler.timeAsync("Weight loading") {
@@ -115,7 +115,7 @@ public class OrpheusTTS {
         return OrpheusTTS(weights: loadedWeights, snacDecoder: snacDecoder, tokenizer: tokenizer, layers: tempLayers)
     }
     
-    public func generateAudio(voice: OrpheusVoice, text: String, temperature: Float = 0.6, topP: Float = 0.8) async throws -> MLXArray {
+    public func generateAudio(voice: OrpheusVoice, text: String, temperature: Float = 0.6, topP: Float = 0.8) async throws -> [Float] {
         let totalGenerationStart = CFAbsoluteTimeGetCurrent()
         
         // Prepare input with voice prefix
@@ -139,9 +139,7 @@ public class OrpheusTTS {
         var kvCaches: [Cache?] = Array(repeating: nil, count: numLayers)
         
         // Process the initial prompt.
-        var (logits, updatedKvCachesAfterPrompt) = Profiler.time("Initial forward pass") {
-            forward(inputIds: current_ids, currentKvCaches: kvCaches)
-        }
+        var (logits, updatedKvCachesAfterPrompt) = forward(inputIds: current_ids, currentKvCaches: kvCaches)
         kvCaches = updatedKvCachesAfterPrompt
         
         // Generate audio tokens
@@ -258,12 +256,13 @@ public class OrpheusTTS {
         let waveform = Profiler.time("SNAC decoding") {
             snacDecoder.decode(codes: code_lists)
         }
-        
+
         let totalGenerationEnd = CFAbsoluteTimeGetCurrent()
         let totalDuration = (totalGenerationEnd - totalGenerationStart) * 1000
         Log.perf.info("🏁 [PROFILE] Total audio generation: \(String(format: "%.2f", totalDuration))ms")
-        
-        return waveform
+
+        waveform.eval()
+        return waveform.asArray(Float.self)
     }
     
     private func forward(inputIds: MLXArray, currentKvCaches: [Cache?]) -> (logits: MLXArray, updatedKvCaches: [Cache?]) {

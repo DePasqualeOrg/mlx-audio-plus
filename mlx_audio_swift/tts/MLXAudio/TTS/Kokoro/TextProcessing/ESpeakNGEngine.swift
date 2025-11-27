@@ -22,7 +22,7 @@ final class ESpeakNGEngine {
   }
 
   // Available languages
-  public enum LanguageDialect: String, CaseIterable {
+  public enum LanguageDialect: String, CaseIterable, Sendable {
     case none = ""
     case enUS = "en-us"
     case enGB = "en-gb"

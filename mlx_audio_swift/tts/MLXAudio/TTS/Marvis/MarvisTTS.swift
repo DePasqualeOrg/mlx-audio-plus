@@ -9,7 +9,7 @@ import AVFoundation
 // MARK: - Main Class
 
 public final class MarvisTTS: Module {
-    public enum ModelVariant: String, CaseIterable {
+    public enum ModelVariant: String, CaseIterable, Sendable {
         case model100m_v0_2_6bit = "Marvis-AI/marvis-tts-100m-v0.2-MLX-6bit"
         case model250m_v0_2_6bit = "Marvis-AI/marvis-tts-250m-v0.2-MLX-6bit"
 
@@ -31,12 +31,12 @@ public final class MarvisTTS: Module {
 
     // MARK: - Public Types
 
-    public enum Voice: String, CaseIterable {
+    public enum Voice: String, CaseIterable, Sendable {
         case conversationalA = "conversational_a"
         case conversationalB = "conversational_b"
     }
 
-    public enum QualityLevel: String, CaseIterable {
+    public enum QualityLevel: String, CaseIterable, Sendable {
         case low
         case medium
         case high
@@ -52,7 +52,7 @@ public final class MarvisTTS: Module {
         }
     }
 
-    public struct GenerationResult {
+    public struct GenerationResult: Sendable {
         public let audio: [Float]
         public let sampleRate: Int
         public let sampleCount: Int
@@ -139,9 +139,6 @@ public final class MarvisTTS: Module {
         self.boundRefText = refText
     }
 
-    deinit {
-        playback?.stop()
-    }
 }
 
 // MARK: - Public API
@@ -149,128 +146,60 @@ public final class MarvisTTS: Module {
 public extension MarvisTTS {
     /// Stops audio playback immediately
     func stopPlayback() {
-        playback?.stop()
+        guard let playback else { return }
+        Task { await playback.stop() }
     }
 
     /// Manually triggers memory cleanup for this TTS instance
-    func cleanupMemory() throws {
+    func cleanUpMemory() throws {
         try model.resetCaches()
         streamingDecoder.reset()
-        playback?.stop()
-        autoreleasepool { }
+        if let playback {
+            Task { await playback.stop() }
+        }
     }
 
-    /// Synthesizes speech using the bound voice or reference; returns a single merged result.
-    func generate(for text: String, quality: QualityLevel? = nil) async throws -> GenerationResult {
-        let results = try await generateAsync(
-            text: text,
-            voice: boundVoice,
-            refAudio: boundRefAudio,
-            refText: boundRefText,
-            qualityLevel: quality ?? boundQuality
-        )
-        return Self.mergeResults(results)
-    }
-
-    /// Generates speech and optionally enqueues playback based on playbackEnabled; returns one merged result.
-    func generateRaw(for text: String, quality: QualityLevel? = nil) async throws -> GenerationResult {
-        let pieces = [text]
-        let qualityToUse = quality ?? boundQuality
-        let results: [GenerationResult] = try await Task.detached(priority: .userInitiated) { [weak self] in
-            guard let self else { return [] as [GenerationResult] }
-            return try self.generateCore(
-                text: pieces,
-                voice: self.boundVoice,
-                refAudio: self.boundRefAudio,
-                refText: self.boundRefText,
-                qualityLevel: qualityToUse,
-                stream: false,
-                streamingInterval: 0.5,
-                onStreamingResult: nil,
-                enqueuePlayback: self.playbackEnabled
-            )
-        }.value
-        return Self.mergeResults(results)
-    }
-
-    /// Streams speech using the bound voice or reference.
-    func stream(_ text: String, quality: QualityLevel? = nil, interval: Double = 0.5) -> AsyncThrowingStream<GenerationResult, Error> {
-        stream(
-            text: text,
+    /// Synchronous generation - call from an actor for thread safety
+    func generateSync(
+        text: String,
+        quality: QualityLevel? = nil,
+        splitPattern: String? = #"(\n+)"#
+    ) throws -> GenerationResult {
+        let pieces = splitText(text, pattern: splitPattern)
+        let results = try generateCore(
+            text: pieces,
             voice: boundVoice,
             refAudio: boundRefAudio,
             refText: boundRefText,
             qualityLevel: quality ?? boundQuality,
-            streamingInterval: interval
+            stream: false,
+            streamingInterval: 0.5,
+            onStreamingResult: nil,
+            enqueuePlayback: playbackEnabled
         )
+        return Self.mergeResults(results)
     }
 
-    /// Non-blocking async variant for a single text string.
-    func generateAsync(
+    /// Synchronous streaming generation - yields results via callback
+    func generateStreamingSync(
         text: String,
-        voice: Voice? = .conversationalA,
-        refAudio: MLXArray? = nil,
-        refText: String? = nil,
-        qualityLevel: QualityLevel = .maximum,
-        splitPattern: String? = #"(\n+)"#
-    ) async throws -> [GenerationResult] {
-        let pieces = splitText(text, pattern: splitPattern)
-
-        return try await Task.detached(priority: .userInitiated) { [weak self] in
-            guard let self else { return [] }
-            return try self.generateCore(
-                text: pieces,
-                voice: voice,
-                refAudio: refAudio,
-                refText: refText,
-                qualityLevel: qualityLevel,
-                stream: false,
-                streamingInterval: 0.5,
-                onStreamingResult: nil,
-                enqueuePlayback: self.playbackEnabled
-            )
-        }.value
-    }
-
-    /// Streams generated audio chunks for the given text as an AsyncThrowingStream.
-    func stream(
-        text: String,
-        voice: Voice? = .conversationalA,
-        refAudio: MLXArray? = nil,
-        refText: String? = nil,
-        qualityLevel: QualityLevel = .maximum,
+        quality: QualityLevel? = nil,
+        interval: Double = 0.5,
         splitPattern: String? = #"(\n+)"#,
-        streamingInterval: Double = 0.5
-    ) -> AsyncThrowingStream<GenerationResult, Error> {
-        AsyncThrowingStream { continuation in
-            let task = Task.detached(priority: .userInitiated) { [weak self] in
-                guard let self else { return }
-                do {
-                    let pieces = self.splitText(text, pattern: splitPattern)
-
-                    _ = try self.generateCore(
-                        text: pieces,
-                        voice: voice,
-                        refAudio: refAudio,
-                        refText: refText,
-                        qualityLevel: qualityLevel,
-                        stream: true,
-                        streamingInterval: streamingInterval,
-                        onStreamingResult: { gr in
-                            continuation.yield(gr)
-                        },
-                        enqueuePlayback: self.playbackEnabled
-                    )
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-
-            continuation.onTermination = { _ in
-                task.cancel()
-            }
-        }
+        onResult: @escaping @Sendable (GenerationResult) -> Void
+    ) throws {
+        let pieces = splitText(text, pattern: splitPattern)
+        _ = try generateCore(
+            text: pieces,
+            voice: boundVoice,
+            refAudio: boundRefAudio,
+            refText: boundRefText,
+            qualityLevel: quality ?? boundQuality,
+            stream: true,
+            streamingInterval: interval,
+            onStreamingResult: onResult,
+            enqueuePlayback: playbackEnabled
+        )
     }
 
     /// Creates a Marvis session and binds a default voice.
@@ -559,7 +488,7 @@ private extension MarvisTTS {
         qualityLevel: QualityLevel,
         stream: Bool,
         streamingInterval: Double,
-        onStreamingResult: ((GenerationResult) -> Void)?,
+        onStreamingResult: (@Sendable (GenerationResult) -> Void)?,
         enqueuePlayback: Bool
     ) throws -> [GenerationResult] {
         guard voice != nil || refAudio != nil else {
@@ -595,7 +524,6 @@ private extension MarvisTTS {
 
         try model.resetCaches()
         if stream { streamingDecoder.reset() }
-        autoreleasepool { }
         return results
     }
 
@@ -607,7 +535,7 @@ private extension MarvisTTS {
         stream: Bool,
         streamingIntervalTokens: Int,
         sampler sampleFn: (MLXArray) -> MLXArray,
-        onStreamingResult: ((GenerationResult) -> Void)?,
+        onStreamingResult: (@Sendable (GenerationResult) -> Void)?,
         enqueuePlayback: Bool
     ) throws -> [GenerationResult] {
         var results: [GenerationResult] = []
@@ -626,7 +554,7 @@ private extension MarvisTTS {
         var startTime = CFAbsoluteTimeGetCurrent()
         var frameCount = 0
 
-        for frameIdx in 0 ..< maxAudioFrames {
+        for _ in 0 ..< maxAudioFrames {
             let frame = try model.generateFrame(
                 maxCodebooks: qualityLevel.codebookCount,
                 tokens: currTokens,
@@ -640,25 +568,18 @@ private extension MarvisTTS {
             samplesFrames.append(frame)
             frameCount += 1
 
-            autoreleasepool {
-                let zerosText = MLXArray.zeros([1, 1], type: Int32.self)
-                let nextFrame = concatenated([frame, zerosText], axis: 1) // [1, K+1]
-                currTokens = expandedDimensions(nextFrame, axis: 1)       // [1, 1, K+1]
+            let zerosText = MLXArray.zeros([1, 1], type: Int32.self)
+            let nextFrame = concatenated([frame, zerosText], axis: 1) // [1, K+1]
+            currTokens = expandedDimensions(nextFrame, axis: 1)       // [1, 1, K+1]
 
-                let onesK = ones([1, frame.shape[1]], type: Bool.self)
-                let zero1 = zeros([1, 1], type: Bool.self)
-                let nextMask = concatenated([onesK, zero1], axis: 1) // [1, K+1]
-                currMask = expandedDimensions(nextMask, axis: 1)     // [1, 1, K+1]
+            let onesK = ones([1, frame.shape[1]], type: Bool.self)
+            let zero1 = zeros([1, 1], type: Bool.self)
+            let nextMask = concatenated([onesK, zero1], axis: 1) // [1, K+1]
+            currMask = expandedDimensions(nextMask, axis: 1)     // [1, 1, K+1]
 
-                currPos = split(currPos, indices: [currPos.shape[1] - 1], axis: 1)[1] + MLXArray(1)
-            }
+            currPos = split(currPos, indices: [currPos.shape[1] - 1], axis: 1)[1] + MLXArray(1)
 
             generatedCount += 1
-
-            // Periodic cleanup
-            if frameIdx % 50 == 0 && frameIdx > 0 {
-                autoreleasepool { }
-            }
 
             if stream, (generatedCount - yieldedCount) >= streamingIntervalTokens {
                 yieldedCount = generatedCount
@@ -707,14 +628,10 @@ private extension MarvisTTS {
             processingTime: elapsed
         )
 
-        if enqueuePlayback {
-            playback?.enqueue(result.audio, prebufferSeconds: streaming ? 2.0 : 0.0)
-        }
-
-        autoreleasepool {
-            _ = stacked
-            _ = audio1x1x
-            _ = audio
+        if enqueuePlayback, let playback {
+            let audio = result.audio
+            let prebuffer = streaming ? 2.0 : 0.0
+            Task { await playback.enqueue(audio, prebufferSeconds: prebuffer) }
         }
 
         return result

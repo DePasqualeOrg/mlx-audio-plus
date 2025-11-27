@@ -1,9 +1,9 @@
-// swift-tools-version:5.9
+// swift-tools-version:6.2
 import PackageDescription
 
 let package = Package(
     name: "mlx-audio",
-    platforms: [.macOS(.v14), .iOS(.v17)],
+    platforms: [.macOS("15.4"), .iOS("18.4")],
     products: [
         .library(
             name: "MLXAudio",

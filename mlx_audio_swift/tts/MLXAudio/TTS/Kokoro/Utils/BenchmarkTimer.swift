@@ -3,54 +3,61 @@
 //
 import Foundation
 
-class BenchmarkTimer {
-  class Timing {
-    let id: String
+actor Timing {
+  let id: String
+  private let parent: Timing?
 
-    private var start: DispatchTime
-    private var finish: DispatchTime?
-    private var childTasks: [Timing] = []
-    private let parent: Timing?
-    private var delta: UInt64 = 0
+  private var start: UInt64
+  private var finish: UInt64?
+  private var childTasks: [Timing] = []
+  private var delta: UInt64 = 0
 
-    init(id: String, parent: Timing?) {
-      start = DispatchTime.now()
-      self.id = id
-      self.parent = parent
-      if let parent { parent.childTasks.append(self) }
-    }
-
-    func startTimer() {
-      start = DispatchTime.now()
-    }
-
-    func stop() {
-      finish = DispatchTime.now()
-      delta += finish!.uptimeNanoseconds - start.uptimeNanoseconds
-    }
-
-    func log(spaces: Int = 0) {
-      guard let _ = finish else { return }
-
-      let spaceString = String(repeating: " ", count: spaces)
-      Log.perf.debug("\(spaceString)\(self.id): \(self.deltaInSec) sec")
-      for childTask in childTasks {
-        childTask.log(spaces: spaces + 2)
-      }
-    }
-
-    var deltaTime: Double { Double(delta) / 1_000_000_000 }
-    var deltaInSec: String { String(format: "%.4f", Double(delta) / 1_000_000_000) }
+  init(id: String, parent: Timing?) {
+    self.id = id
+    self.parent = parent
+    self.start = DispatchTime.now().uptimeNanoseconds
   }
 
-  static let shared = BenchmarkTimer()
+  func addChild(_ child: Timing) {
+    childTasks.append(child)
+  }
 
-  private init() {}
+  func startTimer() {
+    start = DispatchTime.now().uptimeNanoseconds
+  }
+
+  func stop() {
+    let now = DispatchTime.now().uptimeNanoseconds
+    finish = now
+    delta += now - start
+  }
+
+  func log(spaces: Int = 0) async {
+    guard finish != nil else { return }
+
+    let spaceString = String(repeating: " ", count: spaces)
+    Log.perf.debug("\(spaceString)\(self.id): \(self.deltaInSec) sec")
+    for childTask in childTasks {
+      await childTask.log(spaces: spaces + 2)
+    }
+  }
+
+  var deltaTime: Double {
+    Double(delta) / 1_000_000_000
+  }
+
+  var deltaInSec: String {
+    String(format: "%.4f", Double(delta) / 1_000_000_000)
+  }
+}
+
+actor BenchmarkTimer {
+  static let shared = BenchmarkTimer()
 
   private var timers: [String: Timing] = [:]
 
   @discardableResult
-  func create(id: String, parent parentId: String? = nil) -> Timing? {
+  func create(id: String, parent parentId: String? = nil) async -> Timing? {
     guard timers[id] == nil else { return nil }
 
     var parentTiming: Timing?
@@ -59,18 +66,22 @@ class BenchmarkTimer {
       guard parentTiming != nil else { return nil }
     }
 
-    timers[id] = Timing(id: id, parent: parentTiming)
-    return timers[id]
+    let timing = Timing(id: id, parent: parentTiming)
+    if let parentTiming {
+      await parentTiming.addChild(timing)
+    }
+    timers[id] = timing
+    return timing
   }
 
-  func stop(id: String) {
+  func stop(id: String) async {
     guard let timing = timers[id] else { return }
-    timing.stop()
+    await timing.stop()
   }
 
-  func printLog(id: String) {
+  func printLog(id: String) async {
     guard let timing = timers[id] else { return }
-    timing.log()
+    await timing.log()
   }
 
   func reset() {

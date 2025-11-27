@@ -1,7 +1,7 @@
 import MLX
 import MLXNN
 
-public final class KVCache: AttentionCache {
+public final class TTSKVCache: AttentionCache {
 
     public let nKVHeads: Int
     public let kHeadDim: Int

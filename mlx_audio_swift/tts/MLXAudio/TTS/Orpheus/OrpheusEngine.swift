@@ -8,7 +8,6 @@
 
 import AVFoundation
 import Foundation
-import MLX
 
 /// Orpheus TTS engine - high quality with emotional expressions
 ///
@@ -59,7 +58,7 @@ public final class OrpheusEngine: TTSEngine {
 
     // MARK: - TTSEngine Protocol Methods
 
-    public func load(progressHandler: ((Progress) -> Void)?) async throws {
+    public func load(progressHandler: (@Sendable (Progress) -> Void)?) async throws {
         guard !isLoaded else {
             Log.tts.debug("OrpheusEngine already loaded")
             return
@@ -106,7 +105,7 @@ public final class OrpheusEngine: TTSEngine {
         }
 
         do {
-            let audioBuffer = try await orpheusTTS.generateAudio(
+            let samples = try await orpheusTTS.generateAudio(
                 voice: voice,
                 text: trimmedText,
                 temperature: temperature,
@@ -116,8 +115,6 @@ public final class OrpheusEngine: TTSEngine {
             generationTime = Date().timeIntervalSince(startTime)
             Log.tts.timing("Orpheus generation", duration: generationTime)
 
-            // Extract samples from MLXArray
-            let samples = extractSamples(from: audioBuffer)
             lastGeneratedSamples = samples
 
             isGenerating = false
@@ -201,21 +198,6 @@ public final class OrpheusEngine: TTSEngine {
 
     private func resolveVoice(_ voiceID: String) -> OrpheusVoice? {
         OrpheusVoice(rawValue: voiceID)
-    }
-
-    private func extractSamples(from audioBuffer: MLXArray) -> [Float] {
-        let shape = audioBuffer.shape
-
-        if shape.count == 1 {
-            audioBuffer.eval()
-            return audioBuffer.asArray(Float.self)
-        } else if shape.count == 2 {
-            let firstBatch = audioBuffer[0]
-            firstBatch.eval()
-            return firstBatch.asArray(Float.self)
-        }
-
-        return []
     }
 }
 

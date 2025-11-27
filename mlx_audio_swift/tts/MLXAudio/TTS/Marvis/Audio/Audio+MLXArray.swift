@@ -1,6 +1,7 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import Foundation
 import MLX
+import Synchronization
 
 /// Returns (sampleRate, audio).
 public func loadAudioArray(from url: URL) throws -> (Double, MLXArray) {
@@ -36,14 +37,13 @@ public func loadAudioArray(from url: URL) throws -> (Double, MLXArray) {
         throw NSError(domain: "WAVLoader", code: -2, userInfo: [NSLocalizedDescriptionKey: "Out buffer alloc failed"])
     }
 
-    var consumed = false
+    let consumed = Atomic<Bool>(false)
     var convError: NSError?
     let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
-        if consumed {
+        if consumed.exchange(true, ordering: .relaxed) {
             outStatus.pointee = .endOfStream
             return nil
         } else {
-            consumed = true
             outStatus.pointee = .haveData
             return inBuffer
         }

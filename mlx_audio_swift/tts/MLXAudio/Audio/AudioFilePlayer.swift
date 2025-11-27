@@ -2,7 +2,7 @@
 //  AudioFilePlayer.swift
 //  MLXAudio
 //
-//  Plays audio files using AVAudioPlayer.
+//  Plays audio files using AVPlayer.
 //  Used by views for replaying saved audio with progress tracking.
 //
 
@@ -11,7 +11,8 @@ import Foundation
 
 /// Plays audio files with progress tracking
 @Observable
-class AudioFilePlayer: NSObject {
+@MainActor
+final class AudioFilePlayer {
     // MARK: - Public Properties
 
     /// Whether audio is currently playing
@@ -28,16 +29,16 @@ class AudioFilePlayer: NSObject {
 
     // MARK: - Private Properties
 
-    @ObservationIgnored private var player: AVAudioPlayer?
-    @ObservationIgnored private var timer: Timer?
+    @ObservationIgnored private var player: AVPlayer?
+    @ObservationIgnored private var timeObserver: Any?
+    @ObservationIgnored private var statusObservation: NSKeyValueObservation?
+    @ObservationIgnored private var durationObservation: NSKeyValueObservation?
 
     // MARK: - Initialization
 
-    override init() {
-        super.init()
-    }
+    init() {}
 
-    deinit {
+    isolated deinit {
         stop()
     }
 
@@ -46,36 +47,71 @@ class AudioFilePlayer: NSObject {
     /// Load an audio file for playback
     /// - Parameter url: URL of the audio file to load
     func loadAudio(from url: URL) {
-        do {
-            // Stop any existing playback
-            stop()
+        // Stop any existing playback
+        stop()
 
-            // Create new player
-            player = try AVAudioPlayer(contentsOf: url)
-            player?.delegate = self
-            player?.prepareToPlay()
+        // Create new player
+        let item = AVPlayerItem(url: url)
+        player = AVPlayer(playerItem: item)
 
-            // Update state
-            currentAudioURL = url
-            duration = player?.duration ?? 0
-            currentTime = 0
+        // Update state
+        currentAudioURL = url
+        currentTime = 0
 
-            Log.audio.debug("Loaded audio: \(url.lastPathComponent), duration: \(self.duration)s")
-        } catch {
-            Log.audio.error("Failed to load audio: \(error.localizedDescription)")
-            currentAudioURL = nil
-            duration = 0
-            currentTime = 0
+        // Observe duration when ready
+        durationObservation = item.observe(\.duration, options: [.new]) { [weak self] item, _ in
+            Task { @MainActor [weak self] in
+                let seconds = item.duration.seconds
+                if seconds.isFinite {
+                    self?.duration = seconds
+                }
+            }
+        }
+
+        // Observe playback status
+        statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+            Task { @MainActor [weak self] in
+                if item.status == .readyToPlay {
+                    let seconds = item.duration.seconds
+                    if seconds.isFinite {
+                        self?.duration = seconds
+                    }
+                    Log.audio.debug("Loaded audio: \(url.lastPathComponent), duration: \(self?.duration ?? 0)s")
+                } else if item.status == .failed {
+                    Log.audio.error("Failed to load audio: \(item.error?.localizedDescription ?? "unknown")")
+                }
+            }
+        }
+
+        // Add periodic time observer
+        let interval = CMTime(seconds: 0.1, preferredTimescale: 600)
+        timeObserver = player?.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+            Task { @MainActor [weak self] in
+                self?.currentTime = time.seconds
+            }
+        }
+
+        // Observe when playback finishes
+        NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.isPlaying = false
+                self?.currentTime = 0
+                self?.player?.seek(to: .zero)
+                Log.audio.debug("Playback finished")
+            }
         }
     }
 
     /// Start or resume playback
     func play() {
-        guard let player = player else { return }
+        guard player != nil else { return }
 
-        player.play()
+        player?.play()
         isPlaying = true
-        startTimer()
 
         Log.audio.debug("Playback started")
     }
@@ -84,7 +120,6 @@ class AudioFilePlayer: NSObject {
     func pause() {
         player?.pause()
         isPlaying = false
-        stopTimer()
 
         Log.audio.debug("Playback paused")
     }
@@ -100,10 +135,23 @@ class AudioFilePlayer: NSObject {
 
     /// Stop playback and reset to beginning
     func stop() {
-        player?.stop()
+        player?.pause()
         isPlaying = false
-        stopTimer()
         currentTime = 0
+
+        // Remove observers
+        if let timeObserver {
+            player?.removeTimeObserver(timeObserver)
+        }
+        timeObserver = nil
+        statusObservation?.invalidate()
+        statusObservation = nil
+        durationObservation?.invalidate()
+        durationObservation = nil
+
+        NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: player?.currentItem)
+
+        player = nil
 
         Log.audio.debug("Playback stopped")
     }
@@ -111,42 +159,9 @@ class AudioFilePlayer: NSObject {
     /// Seek to a specific time
     /// - Parameter time: Target time in seconds
     func seek(to time: TimeInterval) {
-        guard let player = player else { return }
-        player.currentTime = max(0, min(time, duration))
-        currentTime = player.currentTime
-    }
-
-    // MARK: - Timer Management
-
-    private func startTimer() {
-        stopTimer()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            guard let self = self, let player = self.player else { return }
-            self.currentTime = player.currentTime
-        }
-        timer?.tolerance = 0.05
-    }
-
-    private func stopTimer() {
-        timer?.invalidate()
-        timer = nil
-    }
-}
-
-// MARK: - AVAudioPlayerDelegate
-
-extension AudioFilePlayer: AVAudioPlayerDelegate {
-    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        isPlaying = false
-        stopTimer()
-        currentTime = 0
-
-        Log.audio.debug("Playback finished (success: \(flag))")
-    }
-
-    func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
-        Log.audio.error("Audio decode error: \(error?.localizedDescription ?? "unknown")")
-        isPlaying = false
-        stopTimer()
+        guard let player else { return }
+        let targetTime = CMTime(seconds: max(0, min(time, duration)), preferredTimescale: 600)
+        player.seek(to: targetTime)
+        currentTime = time
     }
 }

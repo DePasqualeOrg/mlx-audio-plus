@@ -45,7 +45,7 @@ public protocol TTSEngine: Observable {
 
     /// Load the model with optional progress reporting
     /// - Parameter progressHandler: Optional callback for download/load progress
-    func load(progressHandler: ((Progress) -> Void)?) async throws
+    func load(progressHandler: (@Sendable (Progress) -> Void)?) async throws
 
     /// Generate audio from text
     /// - Parameters:

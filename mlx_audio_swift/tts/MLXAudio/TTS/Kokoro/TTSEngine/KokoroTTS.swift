@@ -4,9 +4,10 @@
 import Foundation
 import MLX
 import MLXNN
+import Synchronization
 
 // Available voices
-public enum TTSVoice: String, CaseIterable {
+public enum TTSVoice: String, CaseIterable, Sendable {
   case afAlloy
   case afAoede
   case afBella
@@ -61,8 +62,8 @@ public enum TTSVoice: String, CaseIterable {
   case zmYunyang
 }
 
-// Main class, encapsulates the whole Kokoro text-to-speech pipeline
-public class KokoroTTS {
+// Main actor, encapsulates the whole Kokoro text-to-speech pipeline
+public actor KokoroTTS {
   enum KokoroTTSError: Error {
     case tooManyTokens
     case sentenceSplitError
@@ -95,17 +96,17 @@ public class KokoroTTS {
 
   // Hugging Face repo configuration
   private var repoId: String
-  private var progressHandler: (Progress) -> Void
+  private var progressHandler: @Sendable (Progress) -> Void
 
   // Callback type for streaming audio generation
-  public typealias AudioChunkCallback = (MLXArray) -> Void
+  public typealias AudioChunkCallback = @Sendable ([Float]) -> Void
 
   /// Initializes with optional Hugging Face repo configuration.
   ///
   /// Models are downloaded from Hugging Face Hub on first use.
   public init(
     repoId: String = KokoroWeightLoader.defaultRepoId,
-    progressHandler: @escaping (Progress) -> Void = { _ in }
+    progressHandler: @escaping @Sendable (Progress) -> Void = { _ in }
   ) {
     self.repoId = repoId
     self.progressHandler = progressHandler
@@ -135,8 +136,6 @@ public class KokoroTTS {
       kokoroTokenizer = nil
     }
 
-    // Use plain autoreleasepool to encourage memory release
-    autoreleasepool { }
   }
 
   // Initialize model on demand
@@ -215,304 +214,204 @@ public class KokoroTTS {
   private func generateAudioForTokens(
     inputIds: [Int],
     speed: Float
-  ) throws -> MLXArray {
-    // Create a fresh autorelease pool for the entire process
-    return try autoreleasepool { () -> MLXArray in
-      // Start with the standard processing
-      try autoreleasepool {
-        let paddedInputIdsBase = [0] + inputIds + [0]
-        let paddedInputIds = MLXArray(paddedInputIdsBase).expandedDimensions(axes: [0])
-        paddedInputIds.eval()
+  ) throws -> [Float] {
+    let paddedInputIdsBase = [0] + inputIds + [0]
+    let paddedInputIds = MLXArray(paddedInputIdsBase).expandedDimensions(axes: [0])
+    paddedInputIds.eval()
 
-        let inputLengths = MLXArray(paddedInputIds.dim(-1))
-        inputLengths.eval()
+    let inputLengths = MLXArray(paddedInputIds.dim(-1))
+    inputLengths.eval()
 
-        let inputLengthMax: Int = MLX.max(inputLengths).item()
-        var textMask = MLXArray(0 ..< inputLengthMax)
-        textMask.eval()
+    let inputLengthMax: Int = MLX.max(inputLengths).item()
+    var textMask = MLXArray(0 ..< inputLengthMax)
+    textMask.eval()
 
-        textMask = textMask + 1 .> inputLengths
-        textMask.eval()
+    textMask = textMask + 1 .> inputLengths
+    textMask.eval()
 
-        textMask = textMask.expandedDimensions(axes: [0])
-        textMask.eval()
+    textMask = textMask.expandedDimensions(axes: [0])
+    textMask.eval()
 
-        let swiftTextMask: [Bool] = textMask.asArray(Bool.self)
-        let swiftTextMaskInt = swiftTextMask.map { !$0 ? 1 : 0 }
-        let attentionMask = MLXArray(swiftTextMaskInt).reshaped(textMask.shape)
-        attentionMask.eval()
+    let swiftTextMask: [Bool] = textMask.asArray(Bool.self)
+    let swiftTextMaskInt = swiftTextMask.map { !$0 ? 1 : 0 }
+    let attentionMask = MLXArray(swiftTextMaskInt).reshaped(textMask.shape)
+    attentionMask.eval()
 
-        return try autoreleasepool { () -> MLXArray in
-          // Ensure model is initialized
-          guard let bert = bert,
-                let bertEncoder = bertEncoder else {
-            throw KokoroTTSError.modelNotInitialized
-          }
+    // Ensure model is initialized
+    guard let bert = bert,
+          let bertEncoder = bertEncoder else {
+      throw KokoroTTSError.modelNotInitialized
+    }
 
-          let (bertDur, _) = bert(paddedInputIds, attentionMask: attentionMask)
-          bertDur.eval()
+    let (bertDur, _) = bert(paddedInputIds, attentionMask: attentionMask)
+    bertDur.eval()
 
-          autoreleasepool {
-            _ = attentionMask
-          }
+    let dEn = bertEncoder(bertDur).transposed(0, 2, 1)
+    dEn.eval()
 
-          let dEn = bertEncoder(bertDur).transposed(0, 2, 1)
-          dEn.eval()
+    var refS: MLXArray
+    do {
+      guard let voice = voice else {
+        throw KokoroTTSError.modelNotInitialized
+      }
+      refS = voice[min(inputIds.count - 1, voice.shape[0] - 1), 0 ... 1, 0...]
+    } catch {
+      // Use a fallback slice from start of the voice array
+      guard let voice = voice else {
+        throw KokoroTTSError.modelNotInitialized
+      }
+      refS = voice[0, 0 ... 1, 0...]
+    }
+    refS.eval()
 
-          autoreleasepool {
-            _ = bertDur
-          }
+    let s = refS[0 ... 1, 128...]
+    s.eval()
 
-          var refS: MLXArray
-          do {
-            guard let voice = voice else {
-              throw KokoroTTSError.modelNotInitialized
-            }
-            refS = voice[min(inputIds.count - 1, voice.shape[0] - 1), 0 ... 1, 0...]
-          } catch {
-            // Use a fallback slice from start of the voice array
-            guard let voice = voice else {
-              throw KokoroTTSError.modelNotInitialized
-            }
-            refS = voice[0, 0 ... 1, 0...]
-          }
-          refS.eval()
+    // Ensure all components are initialized
+    guard let durationEncoder = durationEncoder,
+          let predictorLSTM = predictorLSTM,
+          let durationProj = durationProj else {
+      throw KokoroTTSError.modelNotInitialized
+    }
 
-          let s = refS[0 ... 1, 128...]
-          s.eval()
+    let d = durationEncoder(dEn, style: s, textLengths: inputLengths, m: textMask)
+    d.eval()
 
-          return try autoreleasepool { () -> MLXArray in
-            // Ensure all components are initialized
-            guard let durationEncoder = durationEncoder,
-                  let predictorLSTM = predictorLSTM,
-                  let durationProj = durationProj else {
-              throw KokoroTTSError.modelNotInitialized
-            }
+    let (x, _) = predictorLSTM(d)
+    x.eval()
 
-            let d = durationEncoder(dEn, style: s, textLengths: inputLengths, m: textMask)
-            d.eval()
+    let duration = durationProj(x)
+    duration.eval()
 
-            autoreleasepool {
-              _ = dEn
-              _ = textMask
-            }
+    let durationSigmoid = MLX.sigmoid(duration).sum(axis: -1) / speed
+    durationSigmoid.eval()
 
-            let (x, _) = predictorLSTM(d)
-            x.eval()
+    let predDur = MLX.clip(durationSigmoid.round(), min: 1).asType(.int32)[0]
+    predDur.eval()
 
-            let duration = durationProj(x)
-            duration.eval()
+    // Index and matrix generation
+    // Build indices in chunks to reduce memory
+    var allIndices: [MLXArray] = []
+    let chunkSize = 50
 
-            autoreleasepool {
-              _ = x
-            }
+    for startIdx in stride(from: 0, to: predDur.shape[0], by: chunkSize) {
+      let endIdx = min(startIdx + chunkSize, predDur.shape[0])
+      let chunkIndices = predDur[startIdx..<endIdx]
 
-            let durationSigmoid = MLX.sigmoid(duration).sum(axis: -1) / speed
-            durationSigmoid.eval()
+      let indices = MLX.concatenated(
+        chunkIndices.enumerated().map { i, n in
+          let nSize: Int = n.item()
+          let arrayIndex = MLXArray([i + startIdx])
+          arrayIndex.eval()
+          let repeated = MLX.repeated(arrayIndex, count: nSize)
+          repeated.eval()
+          return repeated
+        }
+      )
+      indices.eval()
+      allIndices.append(indices)
+    }
 
-            autoreleasepool {
-              _ = duration
-            }
+    let indices = MLX.concatenated(allIndices)
+    indices.eval()
 
-            let predDur = MLX.clip(durationSigmoid.round(), min: 1).asType(.int32)[0]
-            predDur.eval()
+    allIndices.removeAll()
 
-            autoreleasepool {
-              _ = durationSigmoid
-            }
+    let indicesShape = indices.shape[0]
+    let inputIdsShape = paddedInputIds.shape[1]
 
-            // Index and matrix generation - high memory usage
-            // Build indices in chunks to reduce memory
-            var allIndices: [MLXArray] = []
-            let chunkSize = 50 // Process 50 items at a time
+    // Create sparse matrix using COO format
+    var rowIndices: [Int] = []
+    var colIndices: [Int] = []
 
-            for startIdx in stride(from: 0, to: predDur.shape[0], by: chunkSize) {
-              autoreleasepool {
-                let endIdx = min(startIdx + chunkSize, predDur.shape[0])
-                let chunkIndices = predDur[startIdx..<endIdx]
+    // Reserve capacity to avoid reallocations
+    let estimatedNonZeros = min(indicesShape, inputIdsShape * 5)
+    rowIndices.reserveCapacity(estimatedNonZeros)
+    colIndices.reserveCapacity(estimatedNonZeros)
 
-                let indices = MLX.concatenated(
-                  chunkIndices.enumerated().map { i, n in
-                    let nSize: Int = n.item()
-                    let arrayIndex = MLXArray([i + startIdx])
-                    arrayIndex.eval()
-                    let repeated = MLX.repeated(arrayIndex, count: nSize)
-                    repeated.eval()
-                    return repeated
-                  }
-                )
-                indices.eval()
-                allIndices.append(indices)
-              }
-            }
-
-            let indices = MLX.concatenated(allIndices)
-            indices.eval()
-
-            allIndices.removeAll()
-
-            let indicesShape = indices.shape[0]
-            let inputIdsShape = paddedInputIds.shape[1]
-
-            // Create sparse matrix more efficiently using COO format
-            // This drastically reduces memory usage compared to dense matrix
-            var rowIndices: [Int] = []
-            var colIndices: [Int] = []
-            var values: [Float] = []
-
-            // Reserve capacity to avoid reallocations
-            let estimatedNonZeros = min(indicesShape, inputIdsShape * 5)
-            rowIndices.reserveCapacity(estimatedNonZeros)
-            colIndices.reserveCapacity(estimatedNonZeros)
-            values.reserveCapacity(estimatedNonZeros)
-
-            // Process in batches to reduce cache misses
-            let batchSize = 256
-            for startIdx in stride(from: 0, to: indicesShape, by: batchSize) {
-              autoreleasepool {
-                let endIdx = min(startIdx + batchSize, indicesShape)
-                for i in startIdx..<endIdx {
-                  let indiceValue: Int = indices[i].item()
-                  if indiceValue < inputIdsShape {
-                    rowIndices.append(indiceValue)
-                    colIndices.append(i)
-                    values.append(1.0)
-                  }
-                }
-              }
-            }
-
-            autoreleasepool {
-              _ = indices
-              _ = predDur
-            }
-
-            // Create MLXArray from COO data
-            let rowIndicesArray = MLXArray(rowIndices)
-            let colIndicesArray = MLXArray(colIndices)
-            let coo_indices = MLX.stacked([rowIndicesArray, colIndicesArray], axis: 0).transposed(1, 0)
-            let coo_values = MLXArray(values)
-            rowIndicesArray.eval()
-            colIndicesArray.eval()
-            coo_indices.eval()
-            coo_values.eval()
-
-            // Go back to the original dense matrix approach but with better memory management
-            // Create sparse matrix efficiently using Swift arrays first
-            var swiftPredAlnTrg = [Float](repeating: 0.0, count: inputIdsShape * indicesShape)
-            // Process in batches to reduce cache misses
-            let matrixBatchSize = 1000
-            for startIdx in stride(from: 0, to: rowIndices.count, by: matrixBatchSize) {
-              autoreleasepool {
-                let endIdx = min(startIdx + matrixBatchSize, rowIndices.count)
-                for i in startIdx..<endIdx {
-                  let row = rowIndices[i]
-                  let col = colIndices[i]
-                  if row < inputIdsShape && col < indicesShape {
-                    swiftPredAlnTrg[row * indicesShape + col] = 1.0
-                  }
-                }
-              }
-            }
-
-            // Create MLXArray from the dense matrix
-            let predAlnTrg = MLXArray(swiftPredAlnTrg).reshaped([inputIdsShape, indicesShape])
-            predAlnTrg.eval()
-
-            // Clear Swift array immediately
-            swiftPredAlnTrg = []
-
-            autoreleasepool {
-              rowIndices = []
-              colIndices = []
-              values = []
-            }
-
-            let predAlnTrgBatched = predAlnTrg.expandedDimensions(axis: 0)
-            predAlnTrgBatched.eval()
-
-            let en = d.transposed(0, 2, 1).matmul(predAlnTrgBatched)
-            en.eval()
-
-            autoreleasepool {
-              _ = d
-              _ = predAlnTrgBatched
-            }
-
-            return try autoreleasepool { () -> MLXArray in
-              // Ensure components are initialized
-              guard let prosodyPredictor = prosodyPredictor,
-                    let textEncoder = textEncoder,
-                    let decoder = decoder else {
-                throw KokoroTTSError.modelNotInitialized
-              }
-
-              let (F0Pred, NPred) = prosodyPredictor.F0NTrain(x: en, s: s)
-              F0Pred.eval()
-              NPred.eval()
-
-              autoreleasepool {
-                _ = en
-              }
-
-              let tEn = textEncoder(paddedInputIds, inputLengths: inputLengths, m: textMask)
-              tEn.eval()
-
-              autoreleasepool {
-                _ = paddedInputIds
-                _ = inputLengths
-              }
-
-              let asr = MLX.matmul(tEn, predAlnTrg)
-              asr.eval()
-
-              autoreleasepool {
-                _ = tEn
-                _ = predAlnTrg
-              }
-
-              let voiceS = refS[0 ... 1, 0 ... 127]
-              voiceS.eval()
-
-              autoreleasepool {
-                _ = refS
-              }
-
-              let audio = decoder(asr: asr, F0Curve: F0Pred, N: NPred, s: voiceS)[0]
-              audio.eval()
-
-              autoreleasepool {
-                _ = asr
-                _ = F0Pred
-                _ = NPred
-                _ = voiceS
-                _ = s
-              }
-
-              let audioShape = audio.shape
-
-              // Check if the audio shape is valid
-              let totalSamples: Int
-              if audioShape.count == 1 {
-                totalSamples = audioShape[0]
-              } else if audioShape.count == 2 {
-                totalSamples = audioShape[1]
-              } else {
-                totalSamples = 0
-              }
-
-              if totalSamples <= 1 {
-                // Log the error and throw instead of returning a beep
-                Log.tts.error("KokoroTTS: Invalid audio shape - totalSamples: \(totalSamples), shape: \(audioShape)")
-                throw KokoroTTSError.audioGenerationError
-              }
-
-              return audio
-            }
-          }
+    // Process in batches
+    let batchSize = 256
+    for startIdx in stride(from: 0, to: indicesShape, by: batchSize) {
+      let endIdx = min(startIdx + batchSize, indicesShape)
+      for i in startIdx..<endIdx {
+        let indiceValue: Int = indices[i].item()
+        if indiceValue < inputIdsShape {
+          rowIndices.append(indiceValue)
+          colIndices.append(i)
         }
       }
     }
+
+    // Create dense matrix from COO data
+    var swiftPredAlnTrg = [Float](repeating: 0.0, count: inputIdsShape * indicesShape)
+    let matrixBatchSize = 1000
+    for startIdx in stride(from: 0, to: rowIndices.count, by: matrixBatchSize) {
+      let endIdx = min(startIdx + matrixBatchSize, rowIndices.count)
+      for i in startIdx..<endIdx {
+        let row = rowIndices[i]
+        let col = colIndices[i]
+        if row < inputIdsShape && col < indicesShape {
+          swiftPredAlnTrg[row * indicesShape + col] = 1.0
+        }
+      }
+    }
+
+    // Create MLXArray from the dense matrix
+    let predAlnTrg = MLXArray(swiftPredAlnTrg).reshaped([inputIdsShape, indicesShape])
+    predAlnTrg.eval()
+
+    // Clear Swift arrays
+    swiftPredAlnTrg = []
+    rowIndices = []
+    colIndices = []
+
+    let predAlnTrgBatched = predAlnTrg.expandedDimensions(axis: 0)
+    predAlnTrgBatched.eval()
+
+    let en = d.transposed(0, 2, 1).matmul(predAlnTrgBatched)
+    en.eval()
+
+    // Ensure components are initialized
+    guard let prosodyPredictor = prosodyPredictor,
+          let textEncoder = textEncoder,
+          let decoder = decoder else {
+      throw KokoroTTSError.modelNotInitialized
+    }
+
+    let (F0Pred, NPred) = prosodyPredictor.F0NTrain(x: en, s: s)
+    F0Pred.eval()
+    NPred.eval()
+
+    let tEn = textEncoder(paddedInputIds, inputLengths: inputLengths, m: textMask)
+    tEn.eval()
+
+    let asr = MLX.matmul(tEn, predAlnTrg)
+    asr.eval()
+
+    let voiceS = refS[0 ... 1, 0 ... 127]
+    voiceS.eval()
+
+    let audio = decoder(asr: asr, F0Curve: F0Pred, N: NPred, s: voiceS)[0]
+    audio.eval()
+
+    let audioShape = audio.shape
+
+    // Check if the audio shape is valid
+    let totalSamples: Int
+    if audioShape.count == 1 {
+      totalSamples = audioShape[0]
+    } else if audioShape.count == 2 {
+      totalSamples = audioShape[1]
+    } else {
+      totalSamples = 0
+    }
+
+    if totalSamples <= 1 {
+      Log.tts.error("KokoroTTS: Invalid audio shape - totalSamples: \(totalSamples), shape: \(audioShape)")
+      throw KokoroTTSError.audioGenerationError
+    }
+
+    return audio.asArray(Float.self)
   }
 
   public func generateAudio(voice: TTSVoice, text: String, speed: Float = 1.0, chunkCallback: @escaping AudioChunkCallback) async throws {
@@ -525,17 +424,9 @@ public class KokoroTTS {
 
     self.voice = nil
 
-    // Use a separate autorelease pool for each sentence to release memory faster
-    for (_, sentence) in sentences.enumerated() {
-      // Generate audio for this sentence
+    for sentence in sentences {
       let audio = try await self.generateAudioForSentence(voice: voice, text: sentence, speed: speed)
-
-      // Force evaluation to ensure tensor is computed before sending
-      audio.eval()
-
-      // Send this chunk to the callback
       chunkCallback(audio)
-
       MLX.GPU.clearCache()
     }
 
@@ -545,11 +436,32 @@ public class KokoroTTS {
     }
   }
 
-  private func generateAudioForSentence(voice: TTSVoice, text: String, speed: Float) async throws -> MLXArray {
+  public func generateAudioStream(voice: TTSVoice, text: String, speed: Float = 1.0) async throws -> AsyncThrowingStream<[Float], Error> {
+    try await ensureModelInitialized()
+
+    let sentences = SentenceTokenizer.splitIntoSentences(text: text)
+    if sentences.isEmpty {
+      throw KokoroTTSError.sentenceSplitError
+    }
+
+    self.voice = nil
+    let index = Atomic<Int>(0)
+
+    return AsyncThrowingStream {
+      let i = index.wrappingAdd(1, ordering: .relaxed).oldValue
+      guard i < sentences.count else { return nil }
+
+      let audio = try await self.generateAudioForSentence(voice: voice, text: sentences[i], speed: speed)
+      MLX.GPU.clearCache()
+      return audio
+    }
+  }
+
+  private func generateAudioForSentence(voice: TTSVoice, text: String, speed: Float) async throws -> [Float] {
     try await ensureModelInitialized()
 
     if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-      return MLXArray.zeros([1])
+      return [0.0]
     }
 
     // Load voice if it changed or if it was cleared
@@ -580,7 +492,7 @@ public class KokoroTTS {
   }
 
   // Common processing method to convert tokens to audio - used by streaming methods
-  private func processTokensToAudio(inputIds: [Int], speed: Float) throws -> MLXArray {
+  private func processTokensToAudio(inputIds: [Int], speed: Float) throws -> [Float] {
     // Use the token processing method
     return try generateAudioForTokens(
       inputIds: inputIds,

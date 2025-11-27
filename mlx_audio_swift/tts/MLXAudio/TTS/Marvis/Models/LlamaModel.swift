@@ -181,7 +181,7 @@ private class LlamaAttention: Module {
     }
 
     func callAsFunction(
-        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?) -> MLXArray {
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: TTSKVCache?) -> MLXArray {
         let (B, L) = (x.dim(0), x.dim(1))
 
         var queries = q_proj(x)
@@ -259,7 +259,7 @@ private class TransformerBlock: Module {
     }
 
     func callAsFunction(
-        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?) -> MLXArray {
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: TTSKVCache?) -> MLXArray {
         var r = attention(inputLayerNorm(x), mask: mask, cache: cache)
         let h = x + r
         r = mlp(postAttentionLayerNorm(h))
@@ -283,7 +283,7 @@ public class LlamaModel: Module, LLMModel, KVCacheDimensionProvider {
         norm = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
     }
 
-    public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+    public func callAsFunction(_ inputs: MLXArray, cache: [TTSKVCache]?) -> MLXArray {
         var h = inputs
 
         let mask: MLXFast.ScaledDotProductAttentionMaskMode = .causal

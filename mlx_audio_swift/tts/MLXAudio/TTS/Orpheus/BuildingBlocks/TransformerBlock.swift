@@ -10,8 +10,8 @@ import MLXNN
 
 // MARK: - Profiling Helper (if not already defined)
 struct BlockProfiler {
-    static var enabled: Bool = false // Set to true to enable block-level profiling
-    
+    static let enabled: Bool = false
+
     static func time<T>(_ label: String, _ block: () throws -> T) rethrows -> T {
         guard enabled else { return try block() }
         
@@ -183,7 +183,7 @@ class OrpheusTransformerBlock {
         // Assume incoming `weight` is [outFeatures, inFeatures]. We need W^T once.
         // Cache transposed version so we pay the cost only on first use.
         struct StaticCache {
-            static var map: [UInt: MLXArray] = [:]   // key: pointer hash of underlying storage
+            nonisolated(unsafe) static var map: [UInt: MLXArray] = [:]   // key: pointer hash of underlying storage
         }
         let key = UInt(bitPattern: ObjectIdentifier(weight))
         let transposed: MLXArray

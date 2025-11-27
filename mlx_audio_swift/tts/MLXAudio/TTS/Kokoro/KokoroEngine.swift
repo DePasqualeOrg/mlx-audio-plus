@@ -8,7 +8,6 @@
 
 import AVFoundation
 import Foundation
-import MLX
 
 /// Kokoro TTS engine - fast, lightweight TTS with many voice options
 @Observable
@@ -49,7 +48,7 @@ public final class KokoroEngine: TTSEngine {
 
     // MARK: - TTSEngine Protocol Methods
 
-    public func load(progressHandler: ((Progress) -> Void)?) async throws {
+    public func load(progressHandler: (@Sendable (Progress) -> Void)?) async throws {
         guard !isLoaded else {
             Log.tts.debug("KokoroEngine already loaded")
             return
@@ -97,23 +96,17 @@ public final class KokoroEngine: TTSEngine {
         }
 
         do {
-            try await kokoroTTS.generateAudio(
+            for try await samples in try await kokoroTTS.generateAudioStream(
                 voice: ttsVoice,
                 text: trimmedText,
                 speed: speed
-            ) { [weak self] audioBuffer in
-                guard let self = self else { return }
-
+            ) {
                 // Record time to first chunk
                 if firstChunkTime == 0 {
                     firstChunkTime = Date().timeIntervalSince(startTime)
-                    Task { @MainActor in
-                        self.generationTime = firstChunkTime
-                    }
+                    generationTime = firstChunkTime
                 }
 
-                // Extract samples from MLXArray
-                let samples = self.extractSamples(from: audioBuffer)
                 allSamples.append(contentsOf: samples)
             }
 
@@ -179,7 +172,7 @@ public final class KokoroEngine: TTSEngine {
     public func cleanup() async throws {
         await stop()
 
-        kokoroTTS?.resetModel(preserveTextProcessing: false)
+        await kokoroTTS?.resetModel(preserveTextProcessing: false)
         kokoroTTS = nil
         audioPlayer = nil
         audioBuffers.removeAll()
@@ -225,21 +218,16 @@ public final class KokoroEngine: TTSEngine {
         }
 
         do {
-            try await kokoroTTS.generateAudio(
+            for try await samples in try await kokoroTTS.generateAudioStream(
                 voice: ttsVoice,
                 text: trimmedText,
                 speed: speed
-            ) { [weak self] audioBuffer in
-                guard let self = self else { return }
-
+            ) {
                 if firstChunkTime == 0 {
                     firstChunkTime = Date().timeIntervalSince(startTime)
-                    Task { @MainActor in
-                        self.generationTime = firstChunkTime
-                    }
+                    generationTime = firstChunkTime
                 }
 
-                let samples = self.extractSamples(from: audioBuffer)
                 allSamples.append(contentsOf: samples)
 
                 // Stream to audio player
@@ -294,20 +282,6 @@ public final class KokoroEngine: TTSEngine {
         return nil
     }
 
-    private func extractSamples(from audioBuffer: MLXArray) -> [Float] {
-        let shape = audioBuffer.shape
-
-        if shape.count == 1 {
-            audioBuffer.eval()
-            return audioBuffer.asArray(Float.self)
-        } else if shape.count == 2 {
-            let firstBatch = audioBuffer[0]
-            firstBatch.eval()
-            return firstBatch.asArray(Float.self)
-        }
-
-        return []
-    }
 }
 
 // MARK: - Voice ID Helpers

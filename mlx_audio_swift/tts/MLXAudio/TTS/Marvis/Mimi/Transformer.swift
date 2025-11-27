@@ -106,7 +106,8 @@ public final class LayerScale: Module {
 
 // MARK: - Attention
 
-public protocol AttentionCache: KVCache {
+public protocol AttentionCache {
+    var offset: Int { get }
     func updateAndFetch(_ k: MLXArray, _ v: MLXArray) -> (MLXArray, MLXArray)
 }
 
@@ -298,10 +299,10 @@ public final class Transformer: Module {
         return x
     }
 
-    public func makeCache() -> [KVCache] {
+    public func makeCache() -> [TTSKVCache] {
         // Assume your KVCache init matches the python: (head_dim, n_kv_heads)
         let numKVHeads = cfg.numHeads / cfg.kvRepeat
-        return (0..<cfg.numLayers).map { _ in KVCache(headDim: cfg.headDim, nKVHeads: numKVHeads) }
+        return (0..<cfg.numLayers).map { _ in TTSKVCache(headDim: cfg.headDim, nKVHeads: numKVHeads) }
     }
 }
 
@@ -359,5 +360,5 @@ public final class ProjectedTransformer: Module {
         }
     }
 
-    public func makeCache() -> [KVCache] { transformer.makeCache() }
+    public func makeCache() -> [TTSKVCache] { transformer.makeCache() }
 }

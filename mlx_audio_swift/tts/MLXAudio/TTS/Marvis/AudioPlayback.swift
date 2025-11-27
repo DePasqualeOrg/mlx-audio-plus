@@ -1,31 +1,44 @@
 import Foundation
 import AVFoundation
+import Synchronization
 
-final class AudioPlayback {
+/// Thread-safe counter for tracking queued audio samples
+/// Wrapped in a class to allow capturing from actor-isolated context
+final class QueuedSamplesCounter: Sendable {
+    private let value = Atomic<Int>(0)
+
+    func add(_ amount: Int) -> Int {
+        value.add(amount, ordering: .relaxed).newValue
+    }
+
+    func subtract(_ amount: Int) {
+        _ = value.subtract(amount, ordering: .relaxed)
+    }
+
+    func reset() {
+        value.store(0, ordering: .relaxed)
+    }
+}
+
+actor AudioPlayback {
     private let sampleRate: Double
     private let scheduleSliceSeconds: Double = 0.03 // 30ms slices
 
     private var audioEngine: AVAudioEngine!
     private var playerNode: AVAudioPlayerNode!
     private var audioFormat: AVAudioFormat!
-    private var queuedSamples: Int = 0
+    private let queuedSamples = QueuedSamplesCounter()
     private var hasStartedPlayback: Bool = false
 
     init(sampleRate: Double) {
         self.sampleRate = sampleRate
-        setup()
-    }
 
-    deinit {
-        stop()
-    }
-
-    private func setup() {
+        // Set up audio engine inline (can't call actor-isolated methods from init)
         audioEngine = AVAudioEngine()
         playerNode = AVAudioPlayerNode()
         audioFormat = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)
 
-        guard let audioFormat = audioFormat else {
+        guard let audioFormat else {
             return
         }
 
@@ -37,6 +50,10 @@ final class AudioPlayback {
         } catch {
             // Failed to start audio engine
         }
+    }
+
+    isolated deinit {
+        stop()
     }
 
     func enqueue(_ samples: [Float], prebufferSeconds: Double) {
@@ -61,11 +78,11 @@ final class AudioPlayback {
                 for i in 0..<thisLen { channelData[0][i] = samples[offset + i] }
             }
 
-            queuedSamples += Int(frameLength)
+            let currentQueued = queuedSamples.add(Int(frameLength))
             let decAmount = Int(frameLength)
-            playerNode.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
-                guard let self else { return }
-                self.queuedSamples = max(0, self.queuedSamples - decAmount)
+            let counter = queuedSamples
+            playerNode.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
+                counter.subtract(decAmount)
             }
 
             // Start playback logic
@@ -73,23 +90,29 @@ final class AudioPlayback {
                 let prebufferSamples = Int(prebufferSeconds * sampleRate)
                 // For non-streaming (prebufferSeconds = 0), start immediately
                 // For streaming, wait for prebuffer
-                if prebufferSamples == 0 || queuedSamples >= prebufferSamples {
+                if prebufferSamples == 0 || currentQueued >= prebufferSamples {
                     playerNode.play()
                     hasStartedPlayback = true
-                    
-                    // Retry if playback didn't start (similar to Kokoro)
+
+                    // Retry if playback didn't start
                     if !playerNode.isPlaying {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                            self?.playerNode.play()
+                        Task { [weak self] in
+                            try? await Task.sleep(for: .milliseconds(100))
+                            await self?.retryPlayback()
                         }
                     }
                 }
             } else if !playerNode.isPlaying {
-                // If playback was stopped but hasStartedPlayback is still true, restart it
                 playerNode.play()
             }
 
             offset += thisLen
+        }
+    }
+
+    private func retryPlayback() {
+        if let playerNode, !playerNode.isPlaying {
+            playerNode.play()
         }
     }
 
@@ -104,19 +127,19 @@ final class AudioPlayback {
             audioEngine.stop()
         }
         hasStartedPlayback = false
-        queuedSamples = 0
+        queuedSamples.reset()
     }
-    
+
     func reset() {
         stop()
-        
+
         // Reconnect components
         if let playerNode, playerNode.engine != nil {
             audioEngine.detach(playerNode)
         }
         audioEngine.attach(playerNode)
         audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: audioFormat)
-        
+
         // Restart engine
         do {
             try audioEngine.start()

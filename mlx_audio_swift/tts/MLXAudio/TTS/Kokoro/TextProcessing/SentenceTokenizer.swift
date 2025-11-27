@@ -4,7 +4,7 @@
 //
 
 import Foundation
-import NaturalLanguage
+@preconcurrency import NaturalLanguage
 
 public final class SentenceTokenizer {
     private init() {}
