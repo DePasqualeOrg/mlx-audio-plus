@@ -101,8 +101,12 @@ public actor OrpheusTTS {
             SNACDecoder(config: snacConfig, weights: snacWeights)
         }
 
+        // Download and load tokenizer files from Hub
+        let tokenizerURLs = try await Profiler.timeAsync("Tokenizer download") {
+            try await OrpheusTokenizer.download(repoId: repoId, progressHandler: progressHandler)
+        }
         let tokenizer = try Profiler.time("Tokenizer init") {
-            try OrpheusTokenizer()
+            try OrpheusTokenizer(tokenizerURL: tokenizerURLs.tokenizerURL, configURL: tokenizerURLs.configURL)
         }
 
         // Initialize transformer layers

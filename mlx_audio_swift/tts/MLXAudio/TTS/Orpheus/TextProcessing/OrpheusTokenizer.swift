@@ -1,5 +1,6 @@
 import Foundation
 import MLX
+import Hub
 
 public class OrpheusTokenizer {
     private let tokenizerConfig: [String: Any]
@@ -8,18 +9,21 @@ public class OrpheusTokenizer {
     private let continuingSubwordPrefix: String?
     private let endOfWordSuffix: String?
     private let unkToken: String?
-    
+
+    // Default repo for downloading tokenizer files
+    static public let defaultRepoId = "mlx-community/orpheus-3b-0.1-ft-4bit"
+
     // Add vocabSize property
     public var vocabSize: Int {
         return vocab.count
     }
-    
+
     // Hashable struct for BPE pairs
     private struct StringPair: Hashable {
         let first: String
         let second: String
     }
-    
+
     // Build a merge rank dictionary for fast lookup (once)
     private lazy var mergeRanks: [StringPair: Int] = {
         var dict = [StringPair: Int]()
@@ -28,7 +32,7 @@ public class OrpheusTokenizer {
         }
         return dict
     }()
-    
+
     private func getPairs(_ symbols: [String]) -> Set<StringPair> {
         var pairs = Set<StringPair>()
         for i in 0..<(symbols.count - 1) {
@@ -36,40 +40,49 @@ public class OrpheusTokenizer {
         }
         return pairs
     }
-    
-    public init() throws {
-        // Hey you - put tokenizer config file in Orpheus/Resources folder
-        let filePath = Bundle.main.path(forResource: "tokenizer_config", ofType: "json")!        
-        if !FileManager.default.fileExists(atPath: filePath) {
-            fatalError("Orpheus: Tokenizer at \(filePath)")
-        }
-        
+
+    /// Downloads tokenizer files from Hugging Face Hub (cached locally after first download)
+    public static func download(
+        repoId: String = defaultRepoId,
+        progressHandler: @escaping (Progress) -> Void = { _ in }
+    ) async throws -> (tokenizerURL: URL, configURL: URL) {
+        let modelDirectoryURL = try await Hub.snapshot(
+            from: repoId,
+            matching: ["tokenizer.json", "tokenizer_config.json"],
+            progressHandler: progressHandler
+        )
+        return (
+            modelDirectoryURL.appending(path: "tokenizer.json"),
+            modelDirectoryURL.appending(path: "tokenizer_config.json")
+        )
+    }
+
+    /// Initialize tokenizer from downloaded file URLs
+    public init(tokenizerURL: URL, configURL: URL) throws {
         // Load tokenizer configuration
-        guard let configPath = Bundle.main.path(forResource: "tokenizer_config", ofType: "json"),
-              let configData = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+        guard let configData = try? Data(contentsOf: configURL),
               let config = try? JSONSerialization.jsonObject(with: configData) as? [String: Any] else {
             throw TokenizerError.configNotFound
         }
         tokenizerConfig = config
-        
+
         // Extract BPE-specific config
         continuingSubwordPrefix = config["continuing_subword_prefix"] as? String
         endOfWordSuffix = config["end_of_word_suffix"] as? String
         unkToken = config["unk_token"] as? String
-        
+
         // Load vocabulary and merges from tokenizer.json
-        guard let tokenizerPath = Bundle.main.path(forResource: "tokenizer", ofType: "json"),
-              let tokenizerData = try? Data(contentsOf: URL(fileURLWithPath: tokenizerPath)),
+        guard let tokenizerData = try? Data(contentsOf: tokenizerURL),
               let tokenizerDict = try? JSONSerialization.jsonObject(with: tokenizerData) as? [String: Any],
               let model = tokenizerDict["model"] as? [String: Any],
               let vocabDict = model["vocab"] as? [String: Int],
-              let mergesArray = model["merges"] as? [[String]] else {            
+              let mergesArray = model["merges"] as? [[String]] else {
             throw TokenizerError.tokenizerNotFound
         }
-        
+
         vocab = vocabDict
-        
-        // Convert merges to tuples and print first few for debugging
+
+        // Convert merges to tuples
         merges = mergesArray.map { pair in
             (pair[0], pair[1])
         }
