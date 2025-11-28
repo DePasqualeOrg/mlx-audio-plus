@@ -172,14 +172,14 @@ public enum TTSProvider: String, CaseIterable, Identifiable, Sendable {
 
     /// Orpheus voice definitions
     private static let orpheusVoices: [Voice] = [
-        Voice.fromOrpheusID("dan"),
-        Voice.fromOrpheusID("zoe"),
-        Voice.fromOrpheusID("zac"),
-        Voice.fromOrpheusID("jess"),
-        Voice.fromOrpheusID("leo"),
-        Voice.fromOrpheusID("mia"),
-        Voice.fromOrpheusID("julia"),
-        Voice.fromOrpheusID("leah"),
+        Voice(id: "tara", displayName: "Tara", languageCode: "en-US"),
+        Voice(id: "leah", displayName: "Leah", languageCode: "en-US"),
+        Voice(id: "jess", displayName: "Jess", languageCode: "en-US"),
+        Voice(id: "leo", displayName: "Leo", languageCode: "en-US"),
+        Voice(id: "dan", displayName: "Dan", languageCode: "en-GB"),
+        Voice(id: "mia", displayName: "Mia", languageCode: "en-US"),
+        Voice(id: "zac", displayName: "Zac", languageCode: "en-US"),
+        Voice(id: "zoe", displayName: "Zoe", languageCode: "en-US"),
     ]
 
     /// Marvis voice definitions

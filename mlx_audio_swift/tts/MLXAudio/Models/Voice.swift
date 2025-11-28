@@ -91,11 +91,6 @@ public struct Voice: Identifiable, Hashable, Sendable {
         return Voice(id: id, displayName: displayName, languageCode: "en-US")
     }
 
-    /// Create a Voice for Orpheus voices
-    public static func fromOrpheusID(_ id: String) -> Voice {
-        return Voice(id: id, displayName: id.capitalized, languageCode: "en-US")
-    }
-
     // MARK: - Private Helpers
 
     private static func formatKokoroDisplayName(_ id: String) -> String {
