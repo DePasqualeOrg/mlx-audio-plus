@@ -41,7 +41,7 @@ public enum TTSProvider: String, CaseIterable, Identifiable, Sendable {
         case .kokoro:
             return ""
         case .orpheus:
-            return "Orpheus is currently quite slow (0.1x on M1). Working on it!\n\nBut it does support expressions: <laugh>, <chuckle>, <sigh>, <cough>, <sniffle>, <groan>, <yawn>, <gasp>"
+            return "Supports expressions: <laugh>, <chuckle>, <sigh>, <cough>, <sniffle>, <groan>, <yawn>, <gasp>"
         case .marvis:
             return "Marvis: Advanced conversational TTS with streaming support.\n\nNote: Downloads model weights on first use."
         }

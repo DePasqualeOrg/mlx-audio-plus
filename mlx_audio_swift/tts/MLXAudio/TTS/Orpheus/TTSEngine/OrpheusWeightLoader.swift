@@ -28,34 +28,9 @@ public class OrpheusWeightLoader {
     }
 
     static func loadWeights(from url: URL) throws -> [String: MLXArray] {
-        let weights = try MLX.loadArrays(url: url)
-        var processedWeights: [String: MLXArray] = [:]
-
-        let groupSize = 64
-        for (key, value) in weights {
-            if key.hasSuffix(".weight") {
-                // Detect quantized weight by dtype uint32
-                if value.dtype == .uint32 {
-                    // Look for associated scales and biases
-                    let scaleKey = key.replacingOccurrences(of: ".weight", with: ".scales")
-                    let biasKey = key.replacingOccurrences(of: ".weight", with: ".biases")
-                    if let scales = weights[scaleKey], let biases = weights[biasKey] {
-                        let deq = Dequantizer.dequantize(value, scales: scales, biases: biases, groupSize: groupSize, bits: 4)
-                        processedWeights[key] = deq
-
-                    } else {
-                        Log.model.warning("Missing scales/biases for quantized weight \(key). Loading raw.")
-                        processedWeights[key] = value
-                    }
-                } else {
-                    processedWeights[key] = value
-                }
-            } else {
-                // Non-weight tensors keep original
-                processedWeights[key] = value
-            }
-        }
-
-        return processedWeights
+        // Load weights directly without dequantization
+        // Quantized models have .weight (uint32 packed), .scales, and .biases
+        // These will be loaded into QuantizedLinear layers by the Module system
+        return try MLX.loadArrays(url: url)
     }
 }

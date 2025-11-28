@@ -28,8 +28,6 @@ Model weights are downloaded automatically from:
 - [mlx-community/orpheus-3b-0.1-ft-4bit](https://huggingface.co/mlx-community/orpheus-3b-0.1-ft-4bit)
 - [mlx-community/snac_24khz](https://huggingface.co/mlx-community/snac_24khz)
 
-Currently runs quite slow due to MLX-Swift not letting us compile layers with caching. On an M1 we see a 0.1x processing speed.
-
 The full Orpheus functionality is implemented including:
  - Voices: tara, leah, jess, leo, dan, mia, zac, zoe
  - Expressions: <laugh>, <chuckle>, <sigh>, <cough>, <sniffle>, <groan>, <yawn>, <gasp>

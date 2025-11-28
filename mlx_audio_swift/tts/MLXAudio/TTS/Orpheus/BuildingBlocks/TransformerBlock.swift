@@ -6,200 +6,246 @@
 //
 import Foundation
 import MLX
+import MLXFast
 import MLXNN
+import MLXLMCommon
 
-// MARK: - Profiling Helper (if not already defined)
-struct BlockProfiler {
-    static let enabled: Bool = false
+// MARK: - Configuration
 
-    static func time<T>(_ label: String, _ block: () throws -> T) rethrows -> T {
-        guard enabled else { return try block() }
-        
-        let start = CFAbsoluteTimeGetCurrent()
-        let result = try block()
-        let end = CFAbsoluteTimeGetCurrent()
-        let duration = (end - start) * 1000 // Convert to milliseconds
-        Log.perf.debug("    ⚡ [BLOCK] \(label): \(String(format: "%.2f", duration))ms")
-        return result
+/// Configuration for Orpheus model (Llama 3B architecture)
+struct OrpheusConfiguration {
+    let hiddenSize: Int = 3072
+    let intermediateSize: Int = 8192
+    let attentionHeads: Int = 24
+    let kvHeads: Int = 8
+    let hiddenLayers: Int = 28
+    let vocabularySize: Int = 156940  // Updated to match mlx-community/orpheus-3b-0.1-ft-4bit
+    let rmsNormEps: Float = 1e-5
+    let ropeTheta: Float = 500000.0
+    let ropeTraditional: Bool = false
+    let ropeScaleFactor: Float = 32.0
+    let ropeLowFreqFactor: Float = 1.0
+    let ropeHighFreqFactor: Float = 4.0
+    let ropeOldContextLen: Int = 8192
+    let maxSeqLen: Int = 2048
+    let tieWordEmbeddings: Bool = true  // lm_head shares weights with embed_tokens
+
+    var headDim: Int { hiddenSize / attentionHeads }
+}
+
+// MARK: - Attention Module
+
+/// Multi-head attention with support for Grouped Query Attention (GQA)
+class OrpheusAttention: Module {
+    let config: OrpheusConfiguration
+    let scale: Float
+
+    @ModuleInfo(key: "q_proj") var wq: Linear
+    @ModuleInfo(key: "k_proj") var wk: Linear
+    @ModuleInfo(key: "v_proj") var wv: Linear
+    @ModuleInfo(key: "o_proj") var wo: Linear
+
+    let rope: OrpheusRoPE
+
+    init(_ config: OrpheusConfiguration) {
+        self.config = config
+        self.scale = 1.0 / sqrt(Float(config.headDim))
+
+        self._wq.wrappedValue = Linear(config.hiddenSize, config.attentionHeads * config.headDim, bias: false)
+        self._wk.wrappedValue = Linear(config.hiddenSize, config.kvHeads * config.headDim, bias: false)
+        self._wv.wrappedValue = Linear(config.hiddenSize, config.kvHeads * config.headDim, bias: false)
+        self._wo.wrappedValue = Linear(config.attentionHeads * config.headDim, config.hiddenSize, bias: false)
+
+        self.rope = OrpheusRoPE(
+            dims: config.headDim,
+            traditional: config.ropeTraditional,
+            base: config.ropeTheta,
+            maxSeqLen: config.maxSeqLen,
+            scaleFactor: config.ropeScaleFactor,
+            lowFreqFactor: config.ropeLowFreqFactor,
+            highFreqFactor: config.ropeHighFreqFactor,
+            oldContextLen: config.ropeOldContextLen
+        )
+    }
+
+    func callAsFunction(
+        _ x: MLXArray,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        cache: KVCache?
+    ) -> MLXArray {
+        let (B, L) = (x.dim(0), x.dim(1))
+
+        var queries = wq(x)
+        var keys = wk(x)
+        var values = wv(x)
+
+        // Reshape for multi-head attention: [B, L, H, D] -> [B, H, L, D]
+        queries = queries.reshaped(B, L, config.attentionHeads, -1).transposed(0, 2, 1, 3)
+        keys = keys.reshaped(B, L, config.kvHeads, -1).transposed(0, 2, 1, 3)
+        values = values.reshaped(B, L, config.kvHeads, -1).transposed(0, 2, 1, 3)
+
+        // Apply RoPE with cache offset
+        let offset = cache?.offset ?? 0
+        queries = rope.call(queries, offset: offset)
+        keys = rope.call(keys, offset: offset)
+
+        // Update cache and compute attention
+        let output: MLXArray
+        if let cache = cache {
+            (keys, values) = cache.update(keys: keys, values: values)
+            output = MLXFast.scaledDotProductAttention(
+                queries: queries,
+                keys: keys,
+                values: values,
+                scale: scale,
+                mask: mask
+            )
+        } else {
+            output = MLXFast.scaledDotProductAttention(
+                queries: queries,
+                keys: keys,
+                values: values,
+                scale: scale,
+                mask: mask
+            )
+        }
+
+        // Reshape back: [B, H, L, D] -> [B, L, H*D]
+        let outputReshaped = output.transposed(0, 2, 1, 3).reshaped(B, L, -1)
+
+        return wo(outputReshaped)
     }
 }
 
-class OrpheusTransformerBlock {
-    private let weights: [String: MLXArray]
-    private let layerIndex: Int
-    private let hiddenSize: Int
-    private let intermediateSize: Int
-    private let numAttentionHeads: Int
-    private let numKeyValueHeads: Int
-    private let numRepeats: Int
-    private let headDim: Int
-    private let rope: OrpheusRoPE
+// MARK: - MLP Module
 
-    // Pre-transposed Weights
-    private let q_proj_w_T: MLXArray
-    private let k_proj_w_T: MLXArray
-    private let v_proj_w_T: MLXArray
-    private let o_proj_w_T: MLXArray
-    private let gate_proj_w_T: MLXArray
-    private let up_proj_w_T: MLXArray
-    private let down_proj_w_T: MLXArray
-    private let inputNormWeight: MLXArray
-    private let postNormWeight: MLXArray
-    
-    init(weights: [String: MLXArray], layerIndex: Int = 0) {        
-        self.weights = weights
-        self.layerIndex = layerIndex
-        self.hiddenSize = 3072
-        self.intermediateSize = 8192 // Llama 3B config
-        self.numAttentionHeads = 24 // Llama 3B config
-        self.headDim = hiddenSize / numAttentionHeads // 128
+/// Feed-forward network with SiLU activation (SwiGLU variant)
+class OrpheusMLP: Module, UnaryLayer {
+    @ModuleInfo(key: "gate_proj") var gate: Linear
+    @ModuleInfo(key: "down_proj") var down: Linear
+    @ModuleInfo(key: "up_proj") var up: Linear
 
-        // Set numKeyValueHeads to 8 as specified in config.json
-        self.numKeyValueHeads = 8
-        guard numAttentionHeads % numKeyValueHeads == 0 else {
-            fatalError("numAttentionHeads (\(numAttentionHeads)) must be divisible by numKeyValueHeads (\(numKeyValueHeads))")
-        }
-        self.numRepeats = self.numAttentionHeads / self.numKeyValueHeads // 3
-        
-        // Initialize RoPE (dims = headDim)
-        self.rope = OrpheusRoPE(dims: self.headDim)
-        
-        // Initialize and pre-transpose weights for a small speed bump
-        self.inputNormWeight = weights["model.layers.\(layerIndex).input_layernorm.weight"]!
-        self.postNormWeight = weights["model.layers.\(layerIndex).post_attention_layernorm.weight"]!
-
-        // Weights are assumed to be loaded in [in_features, out_features] format if "column-major"
-        self.q_proj_w_T = weights["model.layers.\(layerIndex).self_attn.q_proj.weight"]!
-        self.k_proj_w_T = weights["model.layers.\(layerIndex).self_attn.k_proj.weight"]!
-        self.v_proj_w_T = weights["model.layers.\(layerIndex).self_attn.v_proj.weight"]!
-        self.o_proj_w_T = weights["model.layers.\(layerIndex).self_attn.o_proj.weight"]!
-        
-        self.gate_proj_w_T = weights["model.layers.\(layerIndex).mlp.gate_proj.weight"]!
-        self.up_proj_w_T = weights["model.layers.\(layerIndex).mlp.up_proj.weight"]!
-        self.down_proj_w_T = weights["model.layers.\(layerIndex).mlp.down_proj.weight"]!
+    init(_ config: OrpheusConfiguration) {
+        self._gate.wrappedValue = Linear(config.hiddenSize, config.intermediateSize, bias: false)
+        self._down.wrappedValue = Linear(config.intermediateSize, config.hiddenSize, bias: false)
+        self._up.wrappedValue = Linear(config.hiddenSize, config.intermediateSize, bias: false)
     }
-    
-    func call(_ x: MLXArray, mask: MLXArray? = nil, cache: Cache? = nil) -> (output: MLXArray, updatedCache: Cache?) {
-        // Fast path: avoid repeated dictionary look-ups and debug IO.
-        let B = x.shape[0] // Batch size
-        let L = x.shape[1] // Current sequence length of input x
 
-        // Input RMSNorm
-        let normedX = BlockProfiler.time("RMSNorm (input)") {
-            MLX.rmsNorm(x, weight: self.inputNormWeight, eps: 1e-5)
-        }
-
-        // Self attention projections
-        let (q_proj, k_proj, v_proj) = BlockProfiler.time("Attention projections (Q,K,V)") {
-            let q = OrpheusTransformerBlock.linear(x: normedX, weight: q_proj_w_T)
-            let k = OrpheusTransformerBlock.linear(x: normedX, weight: k_proj_w_T)
-            let v = OrpheusTransformerBlock.linear(x: normedX, weight: v_proj_w_T)
-            return (q, k, v)
-        }
-
-        // Reshape and transpose for multi-head attention
-        var (queries, keys, values) = BlockProfiler.time("Attention reshape/transpose") {
-            let q = q_proj.reshaped([B, L, numAttentionHeads, headDim]).transposed(0, 2, 1, 3)
-            let k = k_proj.reshaped([B, L, numKeyValueHeads, headDim]).transposed(0, 2, 1, 3)
-            let v = v_proj.reshaped([B, L, numKeyValueHeads, headDim]).transposed(0, 2, 1, 3)
-            return (q, k, v)
-        }
-        
-        var updatedLayerCache: Cache? = cache
-
-        if let currentLayerCache = updatedLayerCache {
-            // Use existing cache – incremental decoding path.
-            (queries, keys, values) = BlockProfiler.time("Cache update & RoPE") {
-                // Apply RoPE to new Q, K using cache's current offset.
-                let q_rope = rope.call(queries, offset: currentLayerCache.offset)
-                let k_rope = rope.call(keys, offset: currentLayerCache.offset)
-
-                // Update the cache: updateAndFetch appends newKeys, newValues and updates its own offset.
-                let (fetchedKeys, fetchedValues) = currentLayerCache.updateAndFetch(newKeys: k_rope, newValues: values)
-                return (q_rope, fetchedKeys, fetchedValues)
-            }
-        } else {
-            // No cache (first pass / no caching desired for this layer yet):
-            (queries, keys) = BlockProfiler.time("RoPE (no cache)") {
-                let q_rope = rope.call(queries)
-                let k_rope = rope.call(keys)
-                return (q_rope, k_rope)
-            }
-            // Create a new cache to store these initial keys and values.
-            updatedLayerCache = Cache(keys: keys, values: values, offset: keys.shape[2])
-        }
-        
-        let scale = 1.0 / sqrt(Float(headDim))
-        
-        // Scaled Dot-Product Attention
-        let attnOutput = BlockProfiler.time("Scaled dot-product attention") {
-            MLX.scaledDotProductAttention(queries: queries, keys: keys, values: values, scale: scale, mask: mask)
-        }
-
-        // Reshape back to [B, L, hiddenSize]
-        let attnOutputReshaped = BlockProfiler.time("Attention output reshape") {
-            attnOutput.transposed(0, 2, 1, 3).reshaped([B, L, hiddenSize])
-        }
-
-        // Output projection
-        let attnProj = BlockProfiler.time("Attention output projection") {
-            OrpheusTransformerBlock.linear(x: attnOutputReshaped, weight: o_proj_w_T)
-        }
-        
-        // First residual connection
-        let h = BlockProfiler.time("First residual connection") {
-            x + attnProj
-        }
-
-        // Post attention RMSNorm
-        let normedH = BlockProfiler.time("RMSNorm (post-attention)") {
-            MLX.rmsNorm(h, weight: self.postNormWeight, eps: 1e-5)
-        }
-        
-        // MLP
-        let (gate, up) = BlockProfiler.time("MLP projections (gate, up)") {
-            let g = OrpheusTransformerBlock.linear(x: normedH, weight: gate_proj_w_T)
-            let u = OrpheusTransformerBlock.linear(x: normedH, weight: up_proj_w_T)
-            return (g, u)
-        }
-        
-        let gateUp = BlockProfiler.time("MLP activation (SiLU)") {
-            MLXNN.silu(gate) * up
-        }
-        
-        let down = BlockProfiler.time("MLP down projection") {
-            OrpheusTransformerBlock.linear(x: gateUp, weight: down_proj_w_T)
-        }
-
-        // Second residual connection
-        let output = BlockProfiler.time("Second residual connection") {
-            h + down
-        }
-        
-        return (output, updatedLayerCache)
+    func callAsFunction(_ x: MLXArray) -> MLXArray {
+        down(silu(gate(x)) * up(x))
     }
-    
-    public static func linear(x: MLXArray, weight: MLXArray, bias: MLXArray? = nil) -> MLXArray {
-        // Assume incoming `weight` is [outFeatures, inFeatures]. We need W^T once.
-        // Cache transposed version so we pay the cost only on first use.
-        struct StaticCache {
-            nonisolated(unsafe) static var map: [UInt: MLXArray] = [:]   // key: pointer hash of underlying storage
-        }
-        let key = UInt(bitPattern: ObjectIdentifier(weight))
-        let transposed: MLXArray
-        if let cached = StaticCache.map[key] {
-            transposed = cached
+}
+
+// MARK: - Transformer Block
+
+/// Single transformer layer with attention and MLP
+class OrpheusTransformerBlock: Module {
+    @ModuleInfo(key: "self_attn") var attention: OrpheusAttention
+    @ModuleInfo(key: "mlp") var mlp: OrpheusMLP
+
+    @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
+    @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
+
+    init(_ config: OrpheusConfiguration) {
+        self._attention.wrappedValue = OrpheusAttention(config)
+        self._mlp.wrappedValue = OrpheusMLP(config)
+        self._inputLayerNorm.wrappedValue = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        self._postAttentionLayerNorm.wrappedValue = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
+    }
+
+    func callAsFunction(
+        _ x: MLXArray,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        cache: KVCache?
+    ) -> MLXArray {
+        // Self-attention with residual
+        let h = x + attention(inputLayerNorm(x), mask: mask, cache: cache)
+        // MLP with residual
+        let out = h + mlp(postAttentionLayerNorm(h))
+        return out
+    }
+}
+
+// MARK: - Orpheus Model
+
+/// Main Orpheus model (Llama architecture for TTS)
+class OrpheusModel: Module {
+    let config: OrpheusConfiguration
+
+    @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
+    @ModuleInfo(key: "norm") var norm: RMSNorm
+
+    let layers: [OrpheusTransformerBlock]
+
+    init(_ config: OrpheusConfiguration = OrpheusConfiguration()) {
+        self.config = config
+
+        self._embedTokens.wrappedValue = Embedding(
+            embeddingCount: config.vocabularySize,
+            dimensions: config.hiddenSize
+        )
+        self._norm.wrappedValue = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
+
+        self.layers = (0..<config.hiddenLayers).map { _ in OrpheusTransformerBlock(config) }
+    }
+
+    func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
+        var h = embedTokens(inputs)
+
+        // Determine mask based on sequence length and cache state
+        let mask: MLXFast.ScaledDotProductAttentionMaskMode
+        if h.dim(1) > 1 {
+            mask = .causal  // Multi-token (prompt processing)
         } else {
-            transposed = weight.transposed(1, 0)
-            StaticCache.map[key] = transposed
+            mask = .none    // Single token (incremental generation)
         }
 
-        var output = MLX.matmul(x, transposed)
-
-        // Add bias if present (broadcast along all but last dim).
-        if let b = bias {
-            output = output + b
+        for (i, layer) in layers.enumerated() {
+            h = layer(h, mask: mask, cache: cache?[i])
         }
-        return output
+
+        return norm(h)
+    }
+
+    /// Create KV caches for all layers
+    func newCache() -> [KVCache] {
+        (0..<config.hiddenLayers).map { _ in KVCacheSimple() }
+    }
+}
+
+// MARK: - LM Head Model
+
+/// Orpheus model with language modeling head
+class OrpheusLMHeadModel: Module {
+    @ModuleInfo(key: "model") var model: OrpheusModel
+    @ModuleInfo(key: "lm_head") var lmHead: Linear?
+
+    let config: OrpheusConfiguration
+
+    init(_ config: OrpheusConfiguration = OrpheusConfiguration()) {
+        self.config = config
+        self._model.wrappedValue = OrpheusModel(config)
+
+        // Only create separate lm_head if not tying word embeddings
+        if !config.tieWordEmbeddings {
+            self._lmHead.wrappedValue = Linear(config.hiddenSize, config.vocabularySize, bias: false)
+        }
+    }
+
+    func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
+        let out = model(inputs, cache: cache)
+
+        if let lmHead = lmHead {
+            return lmHead(out)
+        } else {
+            // Tied embeddings: use embedding's asLinear method for output projection
+            // This works correctly for both regular and quantized embeddings
+            return model.embedTokens.asLinear(out)
+        }
+    }
+
+    /// Create KV caches for all layers
+    func newCache() -> [KVCache] {
+        model.newCache()
     }
 }
