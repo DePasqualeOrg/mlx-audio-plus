@@ -303,8 +303,8 @@ private func toStringOrNumber(_ dict: [String: JSONValue]?) -> [String: StringOr
     return out.isEmpty ? nil : out
 }
 
-public func createLlamaConfigurationForBackbone(_ cfg: MarvisModelArgs) -> LlamaConfiguration {
-    LlamaConfiguration(
+public func createMarvisLlamaConfigForBackbone(_ cfg: MarvisModelArgs) -> MarvisLlamaConfig {
+    MarvisLlamaConfig(
         hiddenSize: cfg.hiddenSize,
         hiddenLayers: cfg.numHiddenLayers,
         intermediateSize: cfg.intermediateSize,
@@ -323,8 +323,8 @@ public func createLlamaConfigurationForBackbone(_ cfg: MarvisModelArgs) -> Llama
     )
 }
 
-public func createLlamaConfigurationForDecoder(_ d: DepthDecoderConfig) -> LlamaConfiguration {
-    LlamaConfiguration(
+public func createMarvisLlamaConfigForDecoder(_ d: DepthDecoderConfig) -> MarvisLlamaConfig {
+    MarvisLlamaConfig(
         hiddenSize: d.hiddenSize,
         hiddenLayers: d.numHiddenLayers,
         intermediateSize: d.intermediateSize,
@@ -343,10 +343,10 @@ public func createLlamaConfigurationForDecoder(_ d: DepthDecoderConfig) -> Llama
     )
 }
 
-public func createLlamaConfiguration(flavor: String) throws -> LlamaConfiguration {
+public func createMarvisLlamaConfig(flavor: String) throws -> MarvisLlamaConfig {
     switch flavor {
     case "llama-1B":
-        return LlamaConfiguration(
+        return MarvisLlamaConfig(
             hiddenSize: 2048,
             hiddenLayers: 16,
             intermediateSize: 8192,
@@ -371,7 +371,7 @@ public func createLlamaConfiguration(flavor: String) throws -> LlamaConfiguratio
         )
 
     case "llama-100M":
-        return LlamaConfiguration(
+        return MarvisLlamaConfig(
             hiddenSize: 1024,
             hiddenLayers: 4,
             intermediateSize: 8192,
@@ -406,8 +406,8 @@ public func createLlamaConfiguration(flavor: String) throws -> LlamaConfiguratio
 public final class MarvisModel: Module {
     public let args: MarvisModelArgs
 
-    @ModuleInfo public var backbone: LlamaModel
-    @ModuleInfo public var decoder: LlamaModel
+    @ModuleInfo public var backbone: MarvisLlamaBackbone
+    @ModuleInfo public var decoder: MarvisLlamaBackbone
 
     @ModuleInfo public var text_embeddings: Embedding
     @ModuleInfo public var audio_embeddings: Embedding
@@ -425,25 +425,25 @@ public final class MarvisModel: Module {
     public init(config: MarvisModelArgs) throws {
         self.args = config
 
-        let backCfg: LlamaConfiguration
-        let decCfg: LlamaConfiguration
+        let backCfg: MarvisLlamaConfig
+        let decCfg: MarvisLlamaConfig
         if let depth = config.depthDecoderConfig {
-            backCfg = createLlamaConfigurationForBackbone(config)
-            decCfg = createLlamaConfigurationForDecoder(depth)
+            backCfg = createMarvisLlamaConfigForBackbone(config)
+            decCfg = createMarvisLlamaConfigForDecoder(depth)
         } else {
             guard let backboneFlavor = config.backboneFlavor, let decoderFlavor = config.decoderFlavor else {
                 fatalError("Either depthDecoderConfig or both backboneFlavor and decoderFlavor must be provided")
             }
             do {
-                backCfg = try createLlamaConfiguration(flavor: backboneFlavor)
-                decCfg = try createLlamaConfiguration(flavor: decoderFlavor)
+                backCfg = try createMarvisLlamaConfig(flavor: backboneFlavor)
+                decCfg = try createMarvisLlamaConfig(flavor: decoderFlavor)
             } catch {
-                fatalError("Failed to create LlamaConfiguration: \(error). Backbone flavor: \(backboneFlavor), Decoder flavor: \(decoderFlavor)")
+                fatalError("Failed to create MarvisLlamaConfig: \(error). Backbone flavor: \(backboneFlavor), Decoder flavor: \(decoderFlavor)")
             }
         }
 
-        self._backbone = ModuleInfo(wrappedValue: LlamaModel(backCfg))
-        self._decoder = ModuleInfo(wrappedValue: LlamaModel(decCfg))
+        self._backbone = ModuleInfo(wrappedValue: MarvisLlamaBackbone(backCfg))
+        self._decoder = ModuleInfo(wrappedValue: MarvisLlamaBackbone(decCfg))
 
         let backboneDim = backCfg.hiddenSize
         let decoderDim = decCfg.hiddenSize
@@ -466,21 +466,21 @@ public final class MarvisModel: Module {
     public func cachesAreEnabled() -> Bool { cachesEnabled }
 
     public func resetCaches() throws {
-        let backCfg: LlamaConfiguration
-        let decCfg: LlamaConfiguration
+        let backCfg: MarvisLlamaConfig
+        let decCfg: MarvisLlamaConfig
         
         if let depth = args.depthDecoderConfig {
-            backCfg = createLlamaConfigurationForBackbone(args)
-            decCfg = createLlamaConfigurationForDecoder(depth)
+            backCfg = createMarvisLlamaConfigForBackbone(args)
+            decCfg = createMarvisLlamaConfigForDecoder(depth)
         } else {
             guard let backboneFlavor = args.backboneFlavor, let decoderFlavor = args.decoderFlavor else {
                 fatalError("Either depthDecoderConfig or both backboneFlavor and decoderFlavor must be provided")
             }
             do {
-                backCfg = try createLlamaConfiguration(flavor: backboneFlavor)
-                decCfg = try createLlamaConfiguration(flavor: decoderFlavor)
+                backCfg = try createMarvisLlamaConfig(flavor: backboneFlavor)
+                decCfg = try createMarvisLlamaConfig(flavor: decoderFlavor)
             } catch {
-                fatalError("Failed to create LlamaConfiguration: \(error). Backbone flavor: \(backboneFlavor), Decoder flavor: \(decoderFlavor)")
+                fatalError("Failed to create MarvisLlamaConfig: \(error). Backbone flavor: \(backboneFlavor), Decoder flavor: \(decoderFlavor)")
             }
         }
         
@@ -522,17 +522,17 @@ public final class MarvisModel: Module {
         let basePos = MLXArray.arange(2).reshaped([1, 2])
         var currPos = repeated(basePos, count: B, axis: 0) // [B, 2]
 
-        let decCfg: LlamaConfiguration
+        let decCfg: MarvisLlamaConfig
         if let depth = args.depthDecoderConfig {
-            decCfg = createLlamaConfigurationForDecoder(depth)
+            decCfg = createMarvisLlamaConfigForDecoder(depth)
         } else {
             guard let decoderFlavor = args.decoderFlavor else {
                 fatalError("Either depthDecoderConfig or decoderFlavor must be provided")
             }
             do {
-                decCfg = try createLlamaConfiguration(flavor: decoderFlavor)
+                decCfg = try createMarvisLlamaConfig(flavor: decoderFlavor)
             } catch {
-                fatalError("Failed to create LlamaConfiguration for decoder: \(error). Decoder flavor: \(decoderFlavor)")
+                fatalError("Failed to create MarvisLlamaConfig for decoder: \(error). Decoder flavor: \(decoderFlavor)")
             }
         }
         decoderCache = (0..<decCfg.hiddenLayers).map { _ in TTSKVCache(headDim: decCfg.resolvedHeadDimensions, nKVHeads: decCfg.kvHeads) }

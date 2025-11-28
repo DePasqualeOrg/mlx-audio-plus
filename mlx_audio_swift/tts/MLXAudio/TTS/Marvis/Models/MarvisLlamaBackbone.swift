@@ -39,17 +39,18 @@ private class Llama3ScaledRoPE: Module {
         ropeInit()
     }
 
-    public convenience init(dims: Int, config: LlamaConfiguration) {
+    public convenience init(dims: Int, config: MarvisLlamaConfig) {
         let base = config.ropeTheta
         let rs = config.ropeScaling
         func num(_ k: String, _ d: Float) -> Float {
             guard let v = rs?[k] else { return d }
             switch v {
             case .float(let x): return Float(x)
+            case .int(let x): return Float(x)
             case .string(let s): return Float(s) ?? d
             default:
                 assertionFailure("unexpected value for \(k): \(v)")
-                return 0.0
+                return d
             }
         }
         self.init(
@@ -153,7 +154,7 @@ private class Llama3ScaledRoPE: Module {
 }
 
 private class LlamaAttention: Module {
-    let args: LlamaConfiguration
+    let args: MarvisLlamaConfig
     let scale: Float
 
     @ModuleInfo(key: "q_proj") var q_proj: Linear
@@ -163,7 +164,7 @@ private class LlamaAttention: Module {
 
     let rope: Llama3ScaledRoPE
 
-    init(_ args: LlamaConfiguration) {
+    init(_ args: MarvisLlamaConfig) {
         self.args = args
 
         let dim = args.hiddenSize
@@ -231,7 +232,7 @@ private class MLP: Module, UnaryLayer {
     @ModuleInfo(key: "down_proj") var down: Linear
     @ModuleInfo(key: "up_proj") var up: Linear
 
-    init(_ args: LlamaConfiguration) {
+    init(_ args: MarvisLlamaConfig) {
         _gate.wrappedValue = Linear(args.hiddenSize, args.intermediateSize, bias: args.mlpBias)
         _down.wrappedValue = Linear(args.intermediateSize, args.hiddenSize, bias: args.mlpBias)
         _up.wrappedValue = Linear(args.hiddenSize, args.intermediateSize, bias: args.mlpBias)
@@ -250,7 +251,7 @@ private class TransformerBlock: Module {
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
 
-    init(_ args: LlamaConfiguration) {
+    init(_ args: MarvisLlamaConfig) {
         _attention.wrappedValue = LlamaAttention(args)
         _mlp.wrappedValue = MLP(args)
         _inputLayerNorm.wrappedValue = RMSNorm(
@@ -269,14 +270,14 @@ private class TransformerBlock: Module {
     }
 }
 
-public class LlamaModel: Module, LLMModel, KVCacheDimensionProvider {
+public class MarvisLlamaBackbone: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
     fileprivate let layers: [TransformerBlock]
     let norm: RMSNorm
 
-    public init(_ args: LlamaConfiguration) {
+    public init(_ args: MarvisLlamaConfig) {
         precondition(args.vocabularySize > 0)
         vocabularySize = args.vocabularySize
         kvHeads = (0 ..< args.hiddenLayers).map { _ in args.kvHeads }
@@ -303,7 +304,7 @@ public class LlamaModel: Module, LLMModel, KVCacheDimensionProvider {
     }
 }
 
-public struct LlamaConfiguration: Codable, Sendable {
+public struct MarvisLlamaConfig: Codable, Sendable {
     var hiddenSize: Int
     var hiddenLayers: Int
     var intermediateSize: Int
@@ -427,7 +428,7 @@ public struct LlamaConfiguration: Codable, Sendable {
 
 // MARK: - LoRA
 
-extension LlamaModel: LoRAModel {
+extension MarvisLlamaBackbone: LoRAModel {
     public var loraLayers: [Module] {
         layers
     }

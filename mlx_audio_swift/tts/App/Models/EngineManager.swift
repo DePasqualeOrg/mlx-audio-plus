@@ -139,6 +139,7 @@ final class EngineManager {
         case .kokoro: return KokoroEngine()
         case .orpheus: return OrpheusEngine()
         case .marvis: return MarvisEngine()
+        case .outetts: return OuteTTSEngineWrapper()
         }
     }
 }

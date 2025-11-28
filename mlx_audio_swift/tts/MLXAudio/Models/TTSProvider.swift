@@ -13,6 +13,7 @@ public enum TTSProvider: String, CaseIterable, Identifiable, Sendable {
     case kokoro
     case orpheus
     case marvis
+    case outetts
 
     public var id: String { rawValue }
 
@@ -20,7 +21,10 @@ public enum TTSProvider: String, CaseIterable, Identifiable, Sendable {
 
     /// Human-readable name for UI display
     public var displayName: String {
-        rawValue.capitalized
+        switch self {
+            case .outetts: "OuteTTS"
+            default: rawValue.capitalized
+        }
     }
 
     /// Description of the provider's capabilities
@@ -32,6 +36,8 @@ public enum TTSProvider: String, CaseIterable, Identifiable, Sendable {
             return "High quality with emotional expressions"
         case .marvis:
             return "Advanced conversational TTS with streaming"
+        case .outetts:
+            return "Voice cloning TTS with speaker profiles"
         }
     }
 
@@ -44,6 +50,8 @@ public enum TTSProvider: String, CaseIterable, Identifiable, Sendable {
             return "Supports expressions: <laugh>, <chuckle>, <sigh>, <cough>, <sniffle>, <groan>, <yawn>, <gasp>"
         case .marvis:
             return "Marvis: Advanced conversational TTS with streaming support.\n\nNote: Downloads model weights on first use."
+        case .outetts:
+            return "OuteTTS: Voice cloning TTS.\n\nSupports custom speaker profiles for voice cloning."
         }
     }
 
@@ -69,6 +77,11 @@ public enum TTSProvider: String, CaseIterable, Identifiable, Sendable {
         self == .marvis
     }
 
+    /// Whether this provider supports voice cloning
+    public var supportsVoiceCloning: Bool {
+        self == .outetts
+    }
+
     // MARK: - Voice Management
 
     /// Default voice ID for this provider
@@ -80,6 +93,8 @@ public enum TTSProvider: String, CaseIterable, Identifiable, Sendable {
             return "dan"
         case .marvis:
             return "conversational_a"
+        case .outetts:
+            return "default"
         }
     }
 
@@ -92,6 +107,8 @@ public enum TTSProvider: String, CaseIterable, Identifiable, Sendable {
             return Self.orpheusVoices
         case .marvis:
             return Self.marvisVoices
+        case .outetts:
+            return Self.outeTTSVoices
         }
     }
 
@@ -186,5 +203,11 @@ public enum TTSProvider: String, CaseIterable, Identifiable, Sendable {
     private static let marvisVoices: [Voice] = [
         Voice.fromMarvisID("conversational_a"),
         Voice.fromMarvisID("conversational_b"),
+    ]
+
+    /// OuteTTS voice definitions (supports custom speaker profiles)
+    private static let outeTTSVoices: [Voice] = [
+        Voice(id: "default", displayName: "Default", languageCode: "en-US"),
+        Voice(id: "custom", displayName: "Custom (Voice Clone)", languageCode: "en-US"),
     ]
 }
