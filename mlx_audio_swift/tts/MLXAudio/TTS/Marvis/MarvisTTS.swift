@@ -496,6 +496,8 @@ private extension MarvisTTS {
         }
 
         let base = try makeContext(voice: voice, refAudio: refAudio, refText: refText)
+        // Note: Python Sesame uses top_k=50, Swift uses topP=0.8. Both use temperature=0.9.
+        // This difference may produce slightly different generation characteristics.
         let sampleFn = TopPSampler(temperature: 0.9, topP: 0.8).sample
         let intervalTokens = Int(streamingInterval * 12.5)
         var results: [GenerationResult] = []

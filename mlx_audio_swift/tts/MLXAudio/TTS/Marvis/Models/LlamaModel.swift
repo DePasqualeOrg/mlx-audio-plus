@@ -102,8 +102,9 @@ private class Llama3ScaledRoPE: Module {
 
         let freqDiv = freqs / MLXArray(scaleFactor)
 
-        let smooth = (MLXArray(oldContextLen) / wavelens - MLXArray(lowFreqFactor))
+        let smoothRaw = (MLXArray(oldContextLen) / wavelens - MLXArray(lowFreqFactor))
             / MLXArray(highFreqFactor - lowFreqFactor)
+        let smooth = clip(smoothRaw, min: 0.0, max: 1.0)
         let smoothBlend = (MLXArray(1.0) - smooth) * freqDiv + smooth * freqs
 
         let lessHi = wavelens .< hiThr
