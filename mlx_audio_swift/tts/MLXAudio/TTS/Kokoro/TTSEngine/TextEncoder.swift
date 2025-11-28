@@ -29,6 +29,7 @@ class TextEncoder {
           bias: weights["text_encoder.cnn.\(i).1.beta"]!
         ),
         actv,
+        Dropout(p: 0.2),
       ])
     }
     cnn = cnnLayers
@@ -65,6 +66,8 @@ class TextEncoder {
                     features = MLX.swappedAxes(features, 2, 1)
                 } else if let activation = layer as? LeakyReLU {
                     features = activation(features)
+                } else if let dropout = layer as? Dropout {
+                    features = dropout(features)
                 } else {
                     fatalError("Unsupported layer type")
                 }
@@ -75,6 +78,14 @@ class TextEncoder {
         features = MLX.swappedAxes(features, 2, 1)
         let (lstmOutput, _) = lstm(features)
         features = MLX.swappedAxes(lstmOutput, 2, 1)
+
+        // Pad output to match mask size
+        let maskLen = m.shape[m.shape.count - 1]
+        if features.shape[features.shape.count - 1] < maskLen {
+            var featuresPad = MLXArray.zeros([features.shape[0], features.shape[1], maskLen])
+            featuresPad[0..., 0..., 0..<features.shape[features.shape.count - 1]] = features
+            features = featuresPad
+        }
 
         return MLX.where(mask, 0.0, features)
     }

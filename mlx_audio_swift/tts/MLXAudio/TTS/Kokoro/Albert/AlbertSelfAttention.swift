@@ -15,11 +15,13 @@ class AlbertSelfAttention {
   let value: Linear
   let dense: Linear
   let layerNorm: LayerNorm
+  let attentionDropout: Dropout
 
   init(weights: [String: MLXArray], config: AlbertModelArgs, layerNum: Int, innerGroupNum: Int) {
     numAttentionHeads = config.numAttentionHeads
     attentionHeadSize = config.hiddenSize / config.numAttentionHeads
     allHeadSize = numAttentionHeads * attentionHeadSize
+    attentionDropout = Dropout(p: config.attentionProbsDropoutProb)
 
     query = Linear(weight: weights["bert.encoder.albert_layer_groups.\(layerNum).albert_layers.\(innerGroupNum).attention.query.weight"]!,
                    bias: weights["bert.encoder.albert_layer_groups.\(layerNum).albert_layers.\(innerGroupNum).attention.query.bias"]!)
@@ -80,7 +82,8 @@ class AlbertSelfAttention {
       attentionScores = attentionScores + attentionMask
     }
 
-    let attentionProbs = MLX.softmax(attentionScores, axis: -1)
+    var attentionProbs = MLX.softmax(attentionScores, axis: -1)
+    attentionProbs = attentionDropout(attentionProbs)
 
     var contextLayer = MLX.matmul(attentionProbs, valueLayer)
     contextLayer = contextLayer.transposed(0, 2, 1, 3)

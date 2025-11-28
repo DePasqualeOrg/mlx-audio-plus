@@ -160,7 +160,7 @@ public actor KokoroTTS {
 
     bert = CustomAlbert(weights: sanitizedWeights, config: AlbertModelArgs())
     bertEncoder = Linear(weight: sanitizedWeights["bert_encoder.weight"]!, bias: sanitizedWeights["bert_encoder.bias"]!)
-    durationEncoder = DurationEncoder(weights: sanitizedWeights, dModel: 512, styDim: 128, nlayers: 6)
+    durationEncoder = DurationEncoder(weights: sanitizedWeights, dModel: 512, styDim: 128, nlayers: 3)
 
     predictorLSTM = LSTM(
       inputSize: 512 + 128,
@@ -249,22 +249,16 @@ public actor KokoroTTS {
     let dEn = bertEncoder(bertDur).transposed(0, 2, 1)
     dEn.eval()
 
-    var refS: MLXArray
-    do {
-      guard let voice = voice else {
-        throw KokoroTTSError.modelNotInitialized
-      }
-      refS = voice[min(inputIds.count - 1, voice.shape[0] - 1), 0 ... 1, 0...]
-    } catch {
-      // Use a fallback slice from start of the voice array
-      guard let voice = voice else {
-        throw KokoroTTSError.modelNotInitialized
-      }
-      refS = voice[0, 0 ... 1, 0...]
+    guard let voice = voice else {
+      throw KokoroTTSError.modelNotInitialized
     }
+    // Voice shape is [510, 1, 256], index by phoneme length to get [1, 256]
+    let voiceIdx = min(inputIds.count - 1, voice.shape[0] - 1)
+    let refS = voice[voiceIdx]
     refS.eval()
 
-    let s = refS[0 ... 1, 128...]
+    // Extract style vector: columns 128+ for duration/prosody prediction
+    let s = refS[0..., 128...]
     s.eval()
 
     // Ensure all components are initialized
@@ -388,7 +382,8 @@ public actor KokoroTTS {
     let asr = MLX.matmul(tEn, predAlnTrg)
     asr.eval()
 
-    let voiceS = refS[0 ... 1, 0 ... 127]
+    // Extract style vector: columns 0-127 for decoder
+    let voiceS = refS[0..., ..<128]
     voiceS.eval()
 
     let audio = decoder(asr: asr, F0Curve: F0Pred, N: NPred, s: voiceS)[0]

@@ -147,7 +147,8 @@ class Generator {
   func callAsFunction(_ x: MLXArray, _ s: MLXArray, _ F0Curve: MLXArray) -> MLXArray {
     Task { await BenchmarkTimer.shared.create(id: "GeneratorStart", parent: "Decoder") }
 
-    var f0New = F0Curve[.newAxis, 0..., 0...].transposed(0, 2, 1)
+    // F0Curve: [B, seq] → expandedDimensions(axis: 1) → [B, 1, seq] → transpose → [B, seq, 1]
+    var f0New = F0Curve.expandedDimensions(axis: 1).transposed(0, 2, 1)
     f0New = f0Upsample(f0New)
 
     var (harSource, _, _) = mSource(f0New)

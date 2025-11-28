@@ -114,77 +114,48 @@ func mlxIstft(
   x: MLXArray,
   hopLength: Int? = nil,
   winLength: Int? = nil,
-  window: Any = "hann"
+  window: Any = "hann",
+  center: Bool = true
 ) -> MLXArray {
-  Task { await BenchmarkTimer.shared.create(id: "StartProcessing", parent: "Istft") }
-
   let winLen = winLength ?? ((x.shape[1] - 1) * 2)
   let hopLen = hopLength ?? (winLen / 4)
 
   let w = getWindow(window: window, winLen: winLen, nFft: winLen)
 
   let xTransposed = x.transposed(1, 0)
-  let t = (xTransposed.shape[0] - 1) * hopLen + winLen
-  let windowModLen = 20 / 5
+  let numFrames = xTransposed.shape[0]
+  let t = (numFrames - 1) * hopLen + winLen
 
-  let wSquared = w * w
-  w.eval()
-  wSquared.eval()
+  // Inverse FFT of each frame
+  let framesTime = MLXFFT.irfft(xTransposed, axis: 1)
 
-  let totalWsquared = MLX.concatenated(Array(repeating: wSquared, count: t / winLen))
+  // Compute frame offsets and indices for overlap-add
+  let frameOffsets = MLXArray(Array(stride(from: 0, to: numFrames * hopLen, by: hopLen)))
+  let winIndices = MLXArray(Array(0..<winLen))
 
-  xTransposed.eval()
-  Task { await BenchmarkTimer.shared.stop(id: "StartProcessing") }
+  // Create indices matrix: [numFrames, winLen] where each row is frameOffset + [0, 1, ..., winLen-1]
+  let indices = frameOffsets.expandedDimensions(axis: 1) + winIndices.expandedDimensions(axis: 0)
+  let indicesFlat = indices.reshaped([-1]).asType(.int32)
 
-//  let fft = BenchmarkTimer.shared.create(id: "FFT", parent: "Istft")!
-//  let overlap = BenchmarkTimer.shared.create(id: "Overlap", parent: "Istft")!
+  // Prepare updates
+  let updatesReconstructed = (framesTime * w).reshaped([-1])
+  let updatesWindow = MLX.tiled(w.expandedDimensions(axis: 0), repetitions: [numFrames, 1]).reshaped([-1])
 
-//  fft.startTimer()
-  let output = MLXFFT.irfft(xTransposed, axis: 1) * w
-  output.eval()
+  // Initialize output buffers
+  var reconstructed = MLXArray.zeros([t])
+  var windowSum = MLXArray.zeros([t])
 
-  var outputs: [MLXArray] = []
-  var windowSums: [MLXArray] = []
+  // Scatter-add using indexing
+  reconstructed = reconstructed.at[indicesFlat].add(updatesReconstructed)
+  windowSum = windowSum.at[indicesFlat].add(updatesWindow)
 
-  for i in 0 ..< windowModLen {
-    let outputStride = output[.stride(from: i, by: windowModLen), .ellipsis].reshaped([-1])
-    let windowSumArray = totalWsquared[0 ..< outputStride.shape[0]]
+  // Normalize by window sum (avoid division by zero)
+  reconstructed = MLX.where(windowSum .!= 0, reconstructed / windowSum, reconstructed)
 
-    outputs.append(MLX.concatenated([
-      MLXArray.zeros([i * hopLen]),
-      outputStride,
-      MLXArray.zeros([max(0, t - i * hopLen - outputStride.shape[0])]),
-    ]))
-
-    windowSums.append(MLX.concatenated([
-      MLXArray.zeros([i * hopLen]),
-      windowSumArray,
-      MLXArray.zeros([max(0, t - i * hopLen - windowSumArray.shape[0])]),
-    ]))
+  // Remove padding if centered
+  if center {
+    reconstructed = reconstructed[winLen / 2 ..< (reconstructed.shape[0] - winLen / 2)]
   }
-//  fft.stop()
-//
-//  overlap.startTimer()
-
-  var reconstructed = outputs[0]
-  var windowSum = windowSums[0]
-  for i in 1 ..< windowModLen {
-    reconstructed += outputs[i]
-    windowSum += windowSums[i]
-  }
-  reconstructed.eval()
-  windowSum.eval()
-
-//  overlap.stop()
-
-  Task { await BenchmarkTimer.shared.create(id: "EndProcessing", parent: "Istft") }
-
-  reconstructed =
-    reconstructed[winLen / 2 ..< (reconstructed.shape[0] - winLen / 2)] /
-    windowSum[winLen / 2 ..< (reconstructed.shape[0] - winLen / 2)]
-  reconstructed.eval()
-
-  Task { await BenchmarkTimer.shared.stop(id: "EndProcessing") }
 
   return reconstructed
 }
@@ -256,7 +227,8 @@ class MLXSTFT {
         x: stft,
         hopLength: hopLength,
         winLength: winLength,
-        window: window
+        window: window,
+        center: true
       )
       audio.eval()
 //      fftTimer.stop()

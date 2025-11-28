@@ -5,30 +5,33 @@ import Foundation
 import MLX
 import MLXNN
 
-//
+// Duration Encoder creates nlayers pairs of [LSTM, AdaLayerNorm]
 class DurationEncoder {
   var lstms: [Module] = []
 
-  //
   init(weights: [String: MLXArray], dModel: Int, styDim: Int, nlayers: Int) {
+    // Create nlayers pairs of [LSTM, AdaLayerNorm] = nlayers * 2 total layers
     for i in 0 ..< nlayers {
-      if i % 2 == 0 {
-        lstms.append(
-          LSTM(inputSize: dModel + styDim,
-               hiddenSize: dModel / 2,
-               wxForward: weights["predictor.text_encoder.lstms.\(i).weight_ih_l0"]!,
-               whForward: weights["predictor.text_encoder.lstms.\(i).weight_hh_l0"]!,
-               biasIhForward: weights["predictor.text_encoder.lstms.\(i).bias_ih_l0"]!,
-               biasHhForward: weights["predictor.text_encoder.lstms.\(i).bias_hh_l0"]!,
-               wxBackward: weights["predictor.text_encoder.lstms.\(i).weight_ih_l0_reverse"]!,
-               whBackward: weights["predictor.text_encoder.lstms.\(i).weight_hh_l0_reverse"]!,
-               biasIhBackward: weights["predictor.text_encoder.lstms.\(i).bias_ih_l0_reverse"]!,
-               biasHhBackward: weights["predictor.text_encoder.lstms.\(i).bias_hh_l0_reverse"]!)
-        )
-      } else {
-        lstms.append(AdaLayerNorm(weight: weights["predictor.text_encoder.lstms.\(i).fc.weight"]!,
-                                  bias: weights["predictor.text_encoder.lstms.\(i).fc.bias"]!))
-      }
+      let lstmIdx = i * 2
+      let adaLnIdx = i * 2 + 1
+
+      // LSTM layer
+      lstms.append(
+        LSTM(inputSize: dModel + styDim,
+             hiddenSize: dModel / 2,
+             wxForward: weights["predictor.text_encoder.lstms.\(lstmIdx).weight_ih_l0"]!, // Crash: Task 37: Fatal error: Unexpectedly found nil while unwrapping an Optional value
+             whForward: weights["predictor.text_encoder.lstms.\(lstmIdx).weight_hh_l0"]!,
+             biasIhForward: weights["predictor.text_encoder.lstms.\(lstmIdx).bias_ih_l0"]!,
+             biasHhForward: weights["predictor.text_encoder.lstms.\(lstmIdx).bias_hh_l0"]!,
+             wxBackward: weights["predictor.text_encoder.lstms.\(lstmIdx).weight_ih_l0_reverse"]!,
+             whBackward: weights["predictor.text_encoder.lstms.\(lstmIdx).weight_hh_l0_reverse"]!,
+             biasIhBackward: weights["predictor.text_encoder.lstms.\(lstmIdx).bias_ih_l0_reverse"]!,
+             biasHhBackward: weights["predictor.text_encoder.lstms.\(lstmIdx).bias_hh_l0_reverse"]!)
+      )
+
+      // AdaLayerNorm layer
+      lstms.append(AdaLayerNorm(weight: weights["predictor.text_encoder.lstms.\(adaLnIdx).fc.weight"]!,
+                                bias: weights["predictor.text_encoder.lstms.\(adaLnIdx).fc.bias"]!))
     }
   }
 
