@@ -1,5 +1,3 @@
-# Ported from https://github.com/resemble-ai/chatterbox
-
 from .chatterbox import ChatterboxTTS, Conditionals
 from .config import ChatterboxConfig, T3Config
 from .t3 import T3

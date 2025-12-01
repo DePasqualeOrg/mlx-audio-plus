@@ -1,5 +1,3 @@
-# Ported from https://github.com/resemble-ai/chatterbox
-
 import math
 import time
 from dataclasses import dataclass
@@ -176,17 +174,6 @@ class ChatterboxTTS(nn.Module):
         ve: Optional[VoiceEncoder] = None,
         conds: Optional[Conditionals] = None,
     ):
-        """
-        Initialize ChatterboxTTS.
-
-        Can be called either with a config or with individual components:
-
-        From config (used by mlx_audio loading):
-            model = ChatterboxTTS(config)
-
-        With components:
-            model = ChatterboxTTS(t3, s3gen, ve)
-        """
         super().__init__()
         self.sr = S3GEN_SR  # sample rate of synthesized audio
 
