@@ -195,7 +195,7 @@ class Model(nn.Module):
             self.conds = conds
 
         # S3 tokenizer for speech token extraction (initialized lazily or during load_weights)
-        self.s3_tokenizer = S3TokenizerV2()
+        self.s3_tokenizer = S3TokenizerV2("speech_tokenizer_v2_25hz")
         # Text tokenizer (initialized during load_weights if model_path is available)
         self.tokenizer = None
 
@@ -351,7 +351,7 @@ class Model(nn.Module):
             self.s3gen.load_weights(s3gen_weights, strict=False)
         if s3tok_weights:
             if self.s3_tokenizer is None:
-                self.s3_tokenizer = S3TokenizerV2()
+                self.s3_tokenizer = S3TokenizerV2("speech_tokenizer_v2_25hz")
             self.s3_tokenizer.load_weights(s3tok_weights, strict=False)
 
         # Handle any remaining weights at the top level
@@ -448,7 +448,7 @@ class Model(nn.Module):
         if s3gen_weights:
             load_component_weights(model.s3gen, s3gen_weights, strict=False)
         if s3tok_weights:
-            model.s3_tokenizer = S3TokenizerV2()
+            model.s3_tokenizer = S3TokenizerV2("speech_tokenizer_v2_25hz")
             load_component_weights(model.s3_tokenizer, s3tok_weights, strict=False)
         else:
             print("Warning: s3_tokenizer weights not found in model.safetensors")

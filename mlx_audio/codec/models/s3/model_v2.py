@@ -327,7 +327,7 @@ class S3TokenizerV2(nn.Module):
         config (ModelConfig): Config
     """
 
-    def __init__(self, name: str = "speech_tokenizer_v2_25hz", config: ModelConfig = ModelConfig()):
+    def __init__(self, name: str, config: ModelConfig = ModelConfig()):
         super().__init__()
         if "v1" not in name:
             assert "v2" in name
@@ -565,7 +565,7 @@ class S3TokenizerV2(nn.Module):
     @classmethod
     def from_pretrained(
         cls,
-        name: str = "speech_tokenizer_v2_25hz",
+        name: str,
         repo_id: str = "mlx-community/CosyVoice2-0.5B-S3Tokenizer",
     ) -> "S3TokenizerV2":
         path = fetch_from_hub(repo_id)
