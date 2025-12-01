@@ -362,7 +362,7 @@ def convert_all(
     onnx_path = download_s3tokenizer_onnx(cache_dir)
     s3tok_weights = load_onnx_weights(onnx_path)
     s3tok_weights_mx = numpy_to_mlx(s3tok_weights)
-    s3tok = S3TokenizerV2()
+    s3tok = S3TokenizerV2("speech_tokenizer_v2_25hz")
     s3tok_weights_mx = s3tok.sanitize(s3tok_weights_mx)
     s3tok_weights = mlx_to_numpy(s3tok_weights_mx)
     # Add with prefix
