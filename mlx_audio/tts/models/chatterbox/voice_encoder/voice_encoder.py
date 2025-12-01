@@ -207,13 +207,10 @@ class VoiceEncoder(nn.Module):
             if float(min_val) < 0 or float(max_val) > 1:
                 raise Exception(f"Mels outside [0, 1]. Min={min_val}, Max={max_val}")
 
-        # Pass through LSTM layers
-        hidden = None
-        for t in range(mels.shape[1]):
-            _, hidden = self.lstm(mels[:, t:t+1, :], hidden)
+        # Pass full sequence through LSTM layers (vectorized, no per-timestep loop)
+        _, (h_n, _) = self.lstm(mels)
 
         # Get final hidden state from last layer
-        h_n, _ = hidden
         final_hidden = h_n[-1]  # (B, H)
 
         # Project
@@ -224,7 +221,7 @@ class VoiceEncoder(nn.Module):
             raw_embeds = nn.relu(raw_embeds)
 
         # L2 normalize
-        embeds = raw_embeds / mx.sqrt(mx.sum(raw_embeds ** 2, axis=1, keepdims=True))
+        embeds = raw_embeds / mx.linalg.norm(raw_embeds, axis=1, keepdims=True)
 
         return embeds
 
@@ -266,15 +263,25 @@ class VoiceEncoder(nn.Module):
             pad = mx.zeros((mels.shape[0], len_diff, self.hp.num_mels))
             mels = mx.concatenate([mels, pad], axis=1)
 
-        # Group all partials together
-        partials = []
+        # Group all partials together (vectorized extraction)
+        # For each mel, extract all partials at once using mx.take
+        partial_list = []
         for mel, n_partial in zip(mels, n_partials_list):
-            for i in range(n_partial):
-                start = i * frame_step
-                end = start + self.hp.ve_partial_frames
-                partials.append(mel[start:end])
+            if n_partial > 0:
+                # Create indices for all partials at once: (n_partial, ve_partial_frames)
+                partial_starts = mx.arange(n_partial) * frame_step  # (n_partial,)
+                frame_offsets = mx.arange(self.hp.ve_partial_frames)  # (ve_partial_frames,)
+                # Broadcast to get all indices: (n_partial, ve_partial_frames)
+                indices = partial_starts[:, None] + frame_offsets[None, :]
 
-        partials = mx.stack(partials)  # (total_partials, T, M)
+                # Extract all partials at once for each mel dimension
+                # mel is (T, M), we need (n_partial, ve_partial_frames, M)
+                mel_partials = mx.take(mel, indices.flatten(), axis=0).reshape(
+                    n_partial, self.hp.ve_partial_frames, mel.shape[1]
+                )
+                partial_list.append(mel_partials)
+
+        partials = mx.concatenate(partial_list, axis=0)  # (total_partials, T, M)
 
         # Forward the partials (in batches if needed)
         if batch_size is None or batch_size >= len(partials):
@@ -297,7 +304,7 @@ class VoiceEncoder(nn.Module):
         raw_embeds = mx.stack(raw_embeds)
 
         # L2-normalize the final embeds
-        embeds = raw_embeds / mx.sqrt(mx.sum(raw_embeds ** 2, axis=1, keepdims=True))
+        embeds = raw_embeds / mx.linalg.norm(raw_embeds, axis=1, keepdims=True)
 
         return embeds
 
@@ -309,7 +316,7 @@ class VoiceEncoder(nn.Module):
         """
         assert len(utt_embeds.shape) == 2
         utt_embeds = mx.mean(utt_embeds, axis=0)
-        return utt_embeds / mx.sqrt(mx.sum(utt_embeds ** 2))
+        return utt_embeds / mx.linalg.norm(utt_embeds)
 
     @staticmethod
     def voice_similarity(embeds_x: mx.array, embeds_y: mx.array) -> float:

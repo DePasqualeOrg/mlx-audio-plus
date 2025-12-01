@@ -195,12 +195,7 @@ class T3(nn.Module):
             )
 
         # Concatenate: [conditioning | text | speech]
-        embeds_list = []
-        for i in range(text_emb.shape[0]):
-            embeds_list.append(
-                mx.concatenate([cond_emb[i:i+1], text_emb[i:i+1], speech_emb[i:i+1]], axis=1)
-            )
-        embeds = mx.concatenate(embeds_list, axis=0)
+        embeds = mx.concatenate([cond_emb, text_emb, speech_emb], axis=1)
 
         return embeds, len_cond
 
@@ -383,9 +378,8 @@ class T3(nn.Module):
             repetition_context_size=max_new_tokens,  # Use all generated tokens for repetition
         )
 
-        # Track generated tokens
+        # Track generated tokens (Python list for efficiency - avoid growing mx.array each step)
         generated_ids = [self.hp.start_speech_token]
-        generated_ids_mx = mx.array([[self.hp.start_speech_token]], dtype=mx.int32)
 
         # Initial forward pass to fill cache
         hidden = self.tfmr.model(inputs=None, input_embeddings=input_embeddings, cache=cache)
@@ -405,8 +399,10 @@ class T3(nn.Module):
                 logits = logits[0:1, :]
 
             # Apply logits processors (repetition penalty)
+            # Lazily convert Python list to array - processor only uses last N tokens anyway
             for processor in logits_processors:
-                logits = processor(generated_ids_mx, logits)
+                tokens_for_penalty = mx.array([generated_ids], dtype=mx.int32)
+                logits = processor(tokens_for_penalty, logits)
 
             # Sample next token using the sampler (handles temperature, top_p, min_p)
             next_token = sampler(logits)
@@ -419,10 +415,6 @@ class T3(nn.Module):
                 break
 
             generated_ids.append(next_token_id)
-            generated_ids_mx = mx.concatenate([
-                generated_ids_mx,
-                mx.array([[next_token_id]], dtype=mx.int32)
-            ], axis=1)
 
             # Create embedding for next token with position embedding
             next_token_embed = self.speech_emb(mx.array([[next_token_id]]))
@@ -434,5 +426,8 @@ class T3(nn.Module):
 
             # Forward pass with cache (only new token)
             hidden = self.tfmr.model(inputs=None, input_embeddings=next_token_embed, cache=cache)
+
+            # Pipeline: start computing next step while current finishes
+            mx.async_eval(hidden)
 
         return mx.array([generated_ids])

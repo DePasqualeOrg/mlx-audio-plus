@@ -77,41 +77,36 @@ def kaldi_fbank(
     # Create Povey window
     window = _povey_window(win_length)
 
-    # Process frame by frame (matching Kaldi's snip_edges behavior)
-    frames = []
-    for i in range(num_frames):
-        start = i * hop_length
-        end = start + win_length
-        if end > signal_len:
-            break
+    # Vectorized frame extraction using mx.take (no Python loop)
+    if num_frames > 0:
+        # Create indices for all frames at once: (num_frames, win_length)
+        frame_starts = mx.arange(num_frames) * hop_length  # (num_frames,)
+        frame_offsets = mx.arange(win_length)  # (win_length,)
+        # Broadcast to get all indices: (num_frames, win_length)
+        indices = frame_starts[:, None] + frame_offsets[None, :]
 
-        frame = audio[start:end]
+        # Extract all frames at once
+        frames = mx.take(audio, indices.flatten()).reshape(num_frames, win_length)
 
-        # Remove DC offset per frame (Kaldi's remove_dc_offset=True)
-        frame = frame - mx.mean(frame)
+        # Remove DC offset per frame (vectorized)
+        frames = frames - mx.mean(frames, axis=1, keepdims=True)
 
-        # Apply pre-emphasis (Kaldi default: 0.97)
+        # Apply pre-emphasis (vectorized): frame[1:] - 0.97 * frame[:-1]
         preemph = 0.97
-        frame = mx.concatenate([frame[:1], frame[1:] - preemph * frame[:-1]])
+        frames = mx.concatenate([frames[:, :1], frames[:, 1:] - preemph * frames[:, :-1]], axis=1)
 
-        # Apply window
-        frame = frame * window
-
-        frames.append(frame)
-
-    if len(frames) == 0:
-        # Edge case: audio too short
+        # Apply window (vectorized)
+        frames = frames * window[None, :]
+    else:
+        # Edge case: audio too short - single frame
         frame = audio
-        if len(frame) < win_length:
-            frame = mx.concatenate([frame, mx.zeros((win_length - len(frame),))])
+        if frame.shape[0] < win_length:
+            frame = mx.concatenate([frame, mx.zeros((win_length - frame.shape[0],))])
         frame = frame[:win_length]
         frame = frame - mx.mean(frame)
         frame = mx.concatenate([frame[:1], frame[1:] - 0.97 * frame[:-1]])
         frame = frame * window
-        frames = [frame]
-
-    # Stack frames: (num_frames, win_length)
-    frames = mx.stack(frames)
+        frames = frame[None, :]  # (1, win_length)
 
     # Zero-pad to n_fft for FFT
     if win_length < n_fft:

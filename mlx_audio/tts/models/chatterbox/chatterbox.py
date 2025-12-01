@@ -114,23 +114,17 @@ def drop_invalid_tokens(x: mx.array) -> mx.array:
 
     x_flat = x.flatten()
 
-    # Find SOS position by iterating (no argwhere in MLX)
+    # Find SOS position using argmax (returns first True index)
     sos_mask = (x_flat == SOS)
     s = 0
     if mx.any(sos_mask):
-        for i in range(x_flat.shape[0]):
-            if bool(sos_mask[i]):
-                s = i + 1  # Start after SOS
-                break
+        s = int(mx.argmax(sos_mask)) + 1  # Start after SOS
 
-    # Find EOS position
+    # Find EOS position using argmax
     eos_mask = (x_flat == EOS)
     e = x_flat.shape[0]
     if mx.any(eos_mask):
-        for i in range(x_flat.shape[0]):
-            if bool(eos_mask[i]):
-                e = i  # End before EOS
-                break
+        e = int(mx.argmax(eos_mask))  # End before EOS
 
     return x_flat[s:e]
 
@@ -705,16 +699,13 @@ class ChatterboxTTS(nn.Module):
 
         # Drop invalid tokens
         speech_tokens = drop_invalid_tokens(speech_tokens)
-        # Filter out tokens >= SPEECH_VOCAB_SIZE using mx.where and indexing
+        # Filter out tokens >= SPEECH_VOCAB_SIZE
         mask = speech_tokens < SPEECH_VOCAB_SIZE
-        # Count valid tokens
+        # Use argsort to get indices of valid tokens (preserves order via stable sort)
         valid_count = int(mx.sum(mask.astype(mx.int32)))
-        # Extract valid tokens by iterating (MLX doesn't support boolean indexing)
-        valid_tokens = []
-        for i in range(speech_tokens.shape[0]):
-            if bool(mask[i]):
-                valid_tokens.append(int(speech_tokens[i]))
-        speech_tokens = mx.array(valid_tokens, dtype=mx.int32)
+        sorted_indices = mx.argsort(-mask.astype(mx.int32))
+        valid_indices = sorted_indices[:valid_count]
+        speech_tokens = mx.take(speech_tokens, valid_indices)
 
         # Reshape for S3Gen
         speech_tokens = mx.expand_dims(speech_tokens, 0)

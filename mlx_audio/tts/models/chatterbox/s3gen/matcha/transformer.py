@@ -56,24 +56,19 @@ class DiffusersAttention(nn.Module):
         k = k.reshape(B, T, self.heads, self.dim_head).transpose(0, 2, 1, 3)
         v = v.reshape(B, T, self.heads, self.dim_head).transpose(0, 2, 1, 3)
 
-        # Scaled dot-product attention
-        attn_weights = (q @ k.transpose(0, 1, 3, 2)) * self.scale  # (B, heads, T, T)
-
+        # Prepare mask for mx.fast.scaled_dot_product_attention
+        # MLX expects boolean mask broadcastable to (B, heads, T_q, T_kv)
+        # where True = attend, False = mask out
+        mask = None
         if attention_mask is not None:
             # attention_mask: (B, T) -> (B, 1, 1, T)
             if attention_mask.ndim == 2:
-                attention_mask = attention_mask[:, None, None, :]
-            # Convert bool mask to additive mask
-            attn_weights = mx.where(
-                attention_mask,
-                attn_weights,
-                mx.array(float("-inf"), dtype=attn_weights.dtype),
-            )
+                mask = attention_mask[:, None, None, :]
+            else:
+                mask = attention_mask
 
-        attn_weights = mx.softmax(attn_weights, axis=-1)
-
-        # Apply attention to values
-        out = attn_weights @ v  # (B, heads, T, dim_head)
+        # Use MLX fast attention (fused kernel)
+        out = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, mask=mask)
 
         # Reshape back: (B, heads, T, dim_head) -> (B, T, inner_dim)
         out = out.transpose(0, 2, 1, 3).reshape(B, T, self.inner_dim)

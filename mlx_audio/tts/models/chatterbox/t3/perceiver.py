@@ -27,7 +27,7 @@ class AttentionQKV(nn.Module):
             q: Query tensor (B, T_q, n_heads * head_dim)
             k: Key tensor (B, T_k, n_heads * head_dim)
             v: Value tensor (B, T_v, n_heads * head_dim)
-            mask: Optional attention mask
+            mask: Optional attention mask (boolean, True=attend)
 
         Returns:
             Output tensor (B, T_q, n_heads * head_dim)
@@ -37,18 +37,8 @@ class AttentionQKV(nn.Module):
         k = self.split_heads(k)
         v = self.split_heads(v)
 
-        # Scaled dot-product attention
-        scores = (q @ mx.swapaxes(k, -2, -1)) * self.scale
-
-        if mask is not None:
-            scores = mx.where(mask == 0, -1e9, scores)
-
-        attn = mx.softmax(scores, axis=-1)
-
-        if self.training and self.dropout_rate > 0:
-            attn = nn.Dropout(self.dropout_rate)(attn)
-
-        out = attn @ v  # (B, n_heads, T_q, head_dim)
+        # Use MLX fast attention (fused kernel)
+        out = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, mask=mask)
 
         return self.combine_heads(out)
 
