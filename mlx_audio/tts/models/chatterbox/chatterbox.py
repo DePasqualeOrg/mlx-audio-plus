@@ -13,7 +13,7 @@ from .t3.cond_enc import T3Cond
 from .s3gen import S3Token2Wav
 from .voice_encoder import VoiceEncoder, VoiceEncConfig
 from .s3tokenizer import S3TokenizerV2, log_mel_spectrogram, S3_SR as S3_TOKENIZER_SR
-from .config import ChatterboxConfig
+from .config import ModelConfig
 
 # Constants
 S3_SR = 16000  # Sample rate for speech tokenizer
@@ -148,7 +148,7 @@ class Conditionals:
     gen: dict
 
 
-class ChatterboxTTS(nn.Module):
+class Model(nn.Module):
     """
     Chatterbox Text-to-Speech model.
 
@@ -160,7 +160,7 @@ class ChatterboxTTS(nn.Module):
     - Text Tokenizer: Text to token ID conversion
 
     Usage:
-        model = ChatterboxTTS.from_pretrained("path/to/weights")
+        model = Model.from_pretrained("path/to/weights")
         audio = model.generate("Hello world!", audio_prompt_path="reference.wav")
     """
 
@@ -169,7 +169,7 @@ class ChatterboxTTS(nn.Module):
 
     def __init__(
         self,
-        config_or_t3: Union[ChatterboxConfig, T3] = None,
+        config_or_t3: Union[ModelConfig, T3] = None,
         s3gen: Optional[S3Token2Wav] = None,
         ve: Optional[VoiceEncoder] = None,
         conds: Optional[Conditionals] = None,
@@ -178,9 +178,9 @@ class ChatterboxTTS(nn.Module):
         self.sr = S3GEN_SR  # sample rate of synthesized audio
 
         # Check if first argument is a config
-        if config_or_t3 is None or isinstance(config_or_t3, ChatterboxConfig):
+        if config_or_t3 is None or isinstance(config_or_t3, ModelConfig):
             # Initialize from config
-            config = config_or_t3 or ChatterboxConfig()
+            config = config_or_t3 or ModelConfig()
             self.config = config
             self.t3 = T3(config.t3_config)
             self.s3gen = S3Token2Wav()
@@ -362,7 +362,7 @@ class ChatterboxTTS(nn.Module):
     def from_pretrained(
         cls,
         ckpt_dir: Union[str, Path],
-    ) -> 'ChatterboxTTS':
+    ) -> 'Model':
         """
         Load a pretrained Chatterbox model from a checkpoint directory.
 

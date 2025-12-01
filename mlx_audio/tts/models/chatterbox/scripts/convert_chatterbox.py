@@ -177,7 +177,7 @@ def quantize_t3_backbone(model, bits: int = 4, group_size: int = 64):
     as they are sensitive to quantization.
 
     Args:
-        model: ChatterboxTTS model instance
+        model: Chatterbox Model instance
         bits: Quantization bits (default: 4)
         group_size: Quantization group size (default: 64)
 
@@ -375,9 +375,9 @@ def convert_all(
         print(f"\nApplying {bits}-bit quantization to T3 backbone...")
 
         # Load full model to apply quantization
-        from mlx_audio.tts.models.chatterbox import ChatterboxTTS
+        from mlx_audio.tts.models.chatterbox import Model
 
-        model = ChatterboxTTS()
+        model = Model()
         # Load the weights we just converted
         all_weights_mx = numpy_to_mlx(all_weights)
         model.load_weights(list(all_weights_mx.items()))

@@ -83,7 +83,7 @@ class T3Config:
 
 
 @dataclass
-class ChatterboxConfig(BaseModelArgs):
+class ModelConfig(BaseModelArgs):
     """Main configuration for Chatterbox TTS model."""
 
     # Model type for auto-detection
@@ -109,7 +109,7 @@ class ChatterboxConfig(BaseModelArgs):
             self.t3_config = T3Config.english_only()
 
     @classmethod
-    def from_dict(cls, config: Dict[str, Any]) -> "ChatterboxConfig":
+    def from_dict(cls, config: Dict[str, Any]) -> "ModelConfig":
         """Create config from dictionary."""
         t3_config = None
         if "t3_config" in config:
