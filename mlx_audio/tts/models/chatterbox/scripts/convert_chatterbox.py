@@ -7,15 +7,23 @@ safetensors format. It uses the model's own sanitize() methods to ensure
 consistency between conversion and runtime loading.
 
 Usage:
-    # Full precision (fp16)
-    python scripts/convert_chatterbox.py --output-dir ./Chatterbox-TTS-fp16
+    # Convert to fp16 (local only)
+    python scripts/convert_chatterbox.py
 
-    # Quantized (4-bit T3 backbone)
-    python scripts/convert_chatterbox.py --output-dir ./Chatterbox-TTS-4bit --quantize
+    # Convert to 4-bit quantized (local only)
+    python scripts/convert_chatterbox.py --quantize
 
-    # Upload to Hugging Face
-    python scripts/convert_chatterbox.py -o ./Chatterbox-TTS-fp16 --upload-repo mlx-community/Chatterbox-TTS-fp16
-    python scripts/convert_chatterbox.py -o ./Chatterbox-TTS-4bit --quantize --upload-repo mlx-community/Chatterbox-TTS-4bit
+    # Convert to 8-bit quantized
+    python scripts/convert_chatterbox.py --quantize --q-bits 8
+
+    # Upload to Hugging Face (uses mlx-community/Chatterbox-TTS-fp16 by default)
+    python scripts/convert_chatterbox.py --upload-repo
+
+    # Upload quantized version (uses mlx-community/Chatterbox-TTS-4bit by default)
+    python scripts/convert_chatterbox.py --quantize --upload-repo
+
+    # Custom output dir and repo
+    python scripts/convert_chatterbox.py --mlx-path ./my-model --upload-repo my-org/my-model
 
 Requirements (for conversion only):
     pip install torch safetensors huggingface_hub onnx s3tokenizer
@@ -50,36 +58,17 @@ def download_chatterbox_weights(cache_dir: Path) -> Path:
 
 
 def download_s3tokenizer_onnx(cache_dir: Path) -> Path:
-    """Download S3Tokenizer ONNX weights from ModelScope."""
-    import hashlib
-    import urllib.request
+    """Download S3Tokenizer ONNX weights from Hugging Face."""
+    from huggingface_hub import hf_hub_download
 
-    url = "https://www.modelscope.cn/models/iic/CosyVoice2-0.5B/resolve/master/speech_tokenizer_v2.onnx"
-    expected_sha256 = "d43342aa12163a80bf07bffb94c9de2e120a8df2f9917cd2f642e7f4219c6f71"
-
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    onnx_path = cache_dir / "speech_tokenizer_v2_25hz.onnx"
-
-    if onnx_path.exists():
-        # Verify checksum
-        with open(onnx_path, "rb") as f:
-            if hashlib.sha256(f.read()).hexdigest() == expected_sha256:
-                print(f"S3Tokenizer ONNX already downloaded: {onnx_path}")
-                return onnx_path
-
-    print("Downloading S3Tokenizer ONNX from ModelScope...")
-    urllib.request.urlretrieve(url, onnx_path)
-
-    # Verify
-    with open(onnx_path, "rb") as f:
-        actual_sha256 = hashlib.sha256(f.read()).hexdigest()
-
-    if actual_sha256 != expected_sha256:
-        onnx_path.unlink()
-        raise RuntimeError(f"SHA256 mismatch: {actual_sha256} != {expected_sha256}")
-
+    print("Downloading S3Tokenizer ONNX from Hugging Face...")
+    onnx_path = hf_hub_download(
+        repo_id="FunAudioLLM/CosyVoice2-0.5B",
+        filename="speech_tokenizer_v2.onnx",
+        cache_dir=cache_dir,
+    )
     print(f"Downloaded to: {onnx_path}")
-    return onnx_path
+    return Path(onnx_path)
 
 
 def load_pytorch_safetensors(path: Path) -> Dict[str, np.ndarray]:
@@ -200,37 +189,39 @@ def quantize_t3_backbone(model, bits: int = 4, group_size: int = 64):
     return quantized_count[0]
 
 
-def upload_to_hub(path: Path, upload_repo: str, quantized: bool = False, bits: int = 4):
-    """Upload converted model to Hugging Face Hub."""
-    from huggingface_hub import HfApi
+def generate_readme(path: Path, upload_repo: str):
+    """Generate README.md model card for Hugging Face."""
+    from mlx_audio.version import __version__
 
-    if quantized:
-        precision_info = f"""## Quantization
+    card_text = f"""---
+library_name: mlx-audio
+base_model:
+- ResembleAI/chatterbox
+- FunAudioLLM/CosyVoice2-0.5B
+tags:
+- mlx
+pipeline_tag: text-to-speech
+---
 
-This model uses selective {bits}-bit quantization:
-- **Quantized**: T3 transformer layers (MLP and attention) - ~503M params
-- **Full precision (fp16)**: T3 embeddings/heads, S3Gen, S3Tokenizer, VoiceEncoder
+# {upload_repo}
 
-This reduces model size by ~53% (3.2GB → 1.5GB) with minor quality degradation.
-For highest quality, use the full precision variant: [mlx-community/Chatterbox-TTS-fp16](https://huggingface.co/mlx-community/Chatterbox-TTS-fp16)
-"""
-    else:
-        precision_info = """## Precision
+This model was converted to MLX format from [ResembleAI/chatterbox](https://huggingface.co/ResembleAI/chatterbox) using mlx-audio version **{__version__}**.
 
-This is the full precision (fp16) variant. For a smaller model with minor quality tradeoff,
-see the quantized variant: [mlx-community/Chatterbox-TTS-4bit](https://huggingface.co/mlx-community/Chatterbox-TTS-4bit)
-"""
-
-    # Create model card
-    card_text = f"""# {upload_repo}
-
-This model was converted to MLX format from [ResembleAI/chatterbox](https://huggingface.co/ResembleAI/chatterbox).
+The S3Tokenizer weights are from [FunAudioLLM/CosyVoice2-0.5B](https://huggingface.co/FunAudioLLM/CosyVoice2-0.5B).
 
 ## Use with mlx-audio
 
 ```bash
 pip install -U mlx-audio
 ```
+
+### Command line
+
+```bash
+mlx_audio.tts --model {upload_repo} --text "Hello, this is Chatterbox on MLX!" --ref_audio reference.wav --ref_text "."
+```
+
+### Python
 
 ```python
 from mlx_audio.tts.generate import generate_audio
@@ -239,27 +230,20 @@ generate_audio(
     text="Hello, this is Chatterbox on MLX!",
     model="{upload_repo}",
     ref_audio="reference.wav",
-    ref_text="dummy",
+    ref_text=".",
     file_prefix="output",
 )
 ```
-
-{precision_info}
-## Components
-
-- **T3**: LLaMA-based text-to-speech token generator
-- **S3Gen**: Flow matching decoder with HiFi-GAN vocoder
-- **S3Tokenizer**: Speech tokenizer (FSQ-based)
-- **VoiceEncoder**: LSTM speaker encoder for voice cloning
-
-## References
-
-- [Chatterbox Repository](https://github.com/resemble-ai/chatterbox)
-- [mlx-audio Repository](https://github.com/Blaizzy/mlx-audio)
 """
     card_path = path / "README.md"
     with open(card_path, "w") as f:
         f.write(card_text)
+    print(f"Created: {card_path}")
+
+
+def upload_to_hub(path: Path, upload_repo: str):
+    """Upload converted model to Hugging Face Hub."""
+    from huggingface_hub import HfApi
 
     print(f"\nUploading to {upload_repo}...")
     api = HfApi()
@@ -279,6 +263,7 @@ def convert_all(
     quantize: bool = False,
     bits: int = 4,
     group_size: int = 64,
+    dry_run: bool = False,
 ):
     """
     Convert all Chatterbox weights to MLX format.
@@ -296,6 +281,7 @@ def convert_all(
         quantize: Whether to apply selective quantization to T3 backbone
         bits: Quantization bits (default: 4)
         group_size: Quantization group size (default: 64)
+        dry_run: If True, generate all files including README but skip upload
     """
     import mlx.core as mx
     from mlx.utils import tree_flatten
@@ -425,6 +411,11 @@ def convert_all(
     with open(output_dir / "config.json", "w") as f:
         json.dump(config, f, indent=2)
 
+    # Generate README if upload_repo is specified
+    if upload_repo:
+        print("\nGenerating README.md...")
+        generate_readme(output_dir, upload_repo)
+
     print(f"\n{'🔢' if quantize else '✅'} Conversion complete! Output directory: {output_dir}")
     total_weights = len(new_weights) if quantize else len(all_weights)
     print(f"\nTotal weights: {total_weights}")
@@ -433,9 +424,11 @@ def convert_all(
         size_mb = f.stat().st_size / (1024 * 1024)
         print(f"  {f.name}: {size_mb:.1f} MB")
 
-    # Upload to Hugging Face if requested
-    if upload_repo:
-        upload_to_hub(output_dir, upload_repo, quantized=quantize, bits=bits)
+    # Upload to Hugging Face if requested (and not dry run)
+    if not dry_run:
+        upload_to_hub(output_dir, upload_repo)
+    else:
+        print(f"\n📁 To upload to {upload_repo}, run with --upload-repo")
 
 
 def main():
@@ -443,10 +436,10 @@ def main():
         description="Convert Chatterbox weights to MLX format"
     )
     parser.add_argument(
-        "--output-dir", "-o",
+        "--mlx-path",
         type=Path,
-        default=Path("./Chatterbox-TTS-fp16"),
-        help="Output directory for MLX weights (default: ./Chatterbox-TTS-fp16)"
+        default=None,
+        help="Output directory for MLX weights (default: ./Chatterbox-TTS-{fp16|Nbit})"
     )
     parser.add_argument(
         "--cache-dir",
@@ -457,8 +450,10 @@ def main():
     parser.add_argument(
         "--upload-repo",
         type=str,
+        nargs="?",
+        const="",
         default=None,
-        help="Hugging Face repo to upload to (e.g., mlx-community/Chatterbox-TTS-fp16)"
+        help="Upload to Hugging Face. Optionally specify repo (default: mlx-community/Chatterbox-TTS-{fp16|Nbit})"
     )
     parser.add_argument(
         "--quantize", "-q",
@@ -466,32 +461,40 @@ def main():
         help="Apply 4-bit quantization to T3 backbone (reduces size by ~53%%)"
     )
     parser.add_argument(
-        "--bits",
+        "--q-bits",
         type=int,
         default=4,
         choices=[2, 3, 4, 8],
         help="Quantization bits (default: 4)"
     )
     parser.add_argument(
-        "--group-size",
+        "--q-group-size",
         type=int,
         default=64,
         help="Quantization group size (default: 64)"
     )
-
     args = parser.parse_args()
 
-    # Update default output dir if quantizing
-    if args.quantize and args.output_dir == Path("./Chatterbox-TTS-fp16"):
-        args.output_dir = Path(f"./Chatterbox-TTS-{args.bits}bit")
+    # Determine precision suffix
+    precision_suffix = f"{args.q_bits}bit" if args.quantize else "fp16"
+
+    # Set default output dir based on precision
+    mlx_path = args.mlx_path or Path(f"./Chatterbox-TTS-{precision_suffix}")
+
+    # Determine if we should upload (--upload-repo was provided, even without value)
+    should_upload = args.upload_repo is not None
+
+    # Generate upload repo name (for README, and for upload if requested)
+    upload_repo = (args.upload_repo or f"mlx-community/Chatterbox-TTS-{precision_suffix}") if args.upload_repo is not None else f"mlx-community/Chatterbox-TTS-{precision_suffix}"
 
     convert_all(
-        output_dir=args.output_dir,
+        output_dir=mlx_path,
         cache_dir=args.cache_dir,
-        upload_repo=args.upload_repo,
+        upload_repo=upload_repo,
         quantize=args.quantize,
-        bits=args.bits,
-        group_size=args.group_size,
+        bits=args.q_bits,
+        group_size=args.q_group_size,
+        dry_run=not should_upload,
     )
 
 
