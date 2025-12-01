@@ -524,19 +524,6 @@ class S3TokenizerV2(nn.Module):
         return code, code_len
 
     def sanitize(self, weights: Dict[str, mx.array]) -> Dict[str, mx.array]:
-        """
-        Sanitize PyTorch weights for MLX.
-
-        Handles:
-        - Conv1d weight transposition (PyTorch: out, in, kernel -> MLX: out, kernel, in)
-        - MLP key renaming (PyTorch mlp.0/mlp.2 -> MLX mlp.layers.0/mlp.layers.2)
-        - Skipping computed buffers (_mel_filters, freqs_cis)
-        - Removing unused keys (onnx::* intermediate nodes)
-        - Quantizer key mappings for different source formats
-
-        This method is idempotent - it checks shapes before transposing to support
-        both PyTorch-format and pre-converted MLX-format weights.
-        """
         new_weights = {}
 
         # Get expected shapes from model for idempotent transposition

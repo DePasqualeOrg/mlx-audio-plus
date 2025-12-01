@@ -1,4 +1,3 @@
-# Ported from https://github.com/resemble-ai/chatterbox
 
 from dataclasses import dataclass
 from typing import Dict, Any
@@ -6,8 +5,6 @@ from typing import Dict, Any
 from ..base import BaseModelArgs
 
 
-# LLaMA configuration for 520M parameter model
-# Only includes parameters accepted by mlx_lm.models.llama.ModelArgs
 LLAMA_520M_CONFIG = {
     "model_type": "llama",
     "vocab_size": 8,  # Unused due to custom input layers

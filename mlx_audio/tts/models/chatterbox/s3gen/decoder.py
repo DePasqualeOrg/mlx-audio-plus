@@ -1,5 +1,3 @@
-# Ported from https://github.com/resemble-ai/chatterbox
-# Original: chatterbox/models/s3gen/decoder.py
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -41,7 +39,6 @@ class CausalConv1d(nn.Module):
         self.causal_padding = kernel_size - 1
 
     def __call__(self, x: mx.array) -> mx.array:
-        # x is (B, C, T), transpose to (B, T, C) for MLX Conv1d
         x = mx.swapaxes(x, 1, 2)  # (B, C, T) -> (B, T, C)
         # Pad on the left for causal convolution (time axis is now 1)
         x = mx.pad(x, [(0, 0), (self.causal_padding, 0), (0, 0)])
@@ -64,7 +61,6 @@ class CausalBlock1D(nn.Module):
         self.norm = nn.LayerNorm(dim_out)
 
     def __call__(self, x: mx.array, mask: mx.array) -> mx.array:
-        # Apply conv with mask
         output = self.conv(x * mask)
         # Transpose to (B, T, C), apply LayerNorm, transpose back
         output = mx.swapaxes(output, 1, 2)  # (B, C, T) -> (B, T, C)

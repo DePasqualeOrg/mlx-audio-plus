@@ -1,4 +1,3 @@
-# Ported from https://github.com/resemble-ai/chatterbox
 
 from .hifigan import HiFTGenerator, Snake
 from .f0_predictor import ConvRNNF0Predictor
