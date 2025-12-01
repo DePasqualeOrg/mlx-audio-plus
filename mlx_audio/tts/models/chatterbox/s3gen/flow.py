@@ -89,7 +89,7 @@ class CausalMaskedDiffWithXvec(nn.Module):
         assert token.shape[0] == 1
 
         # Speaker embedding projection
-        embedding = embedding / mx.sqrt(mx.sum(embedding ** 2, axis=1, keepdims=True))  # Normalize
+        embedding = embedding / mx.linalg.norm(embedding, axis=1, keepdims=True)  # Normalize
         embedding = self.spk_embed_affine_layer(embedding)
 
         # Concatenate prompt and new tokens

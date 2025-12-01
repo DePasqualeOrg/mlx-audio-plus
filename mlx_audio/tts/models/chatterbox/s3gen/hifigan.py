@@ -190,25 +190,24 @@ class SineGen(nn.Module):
         """
         B, _, T = f0.shape
 
-        # Create frequency matrix for harmonics
-        F_mat = mx.zeros((B, self.harmonic_num + 1, T))
-        for i in range(self.harmonic_num + 1):
-            F_mat[:, i:i+1, :] = f0 * (i + 1) / self.sampling_rate
+        # Create frequency matrix for harmonics using broadcasting (no loop)
+        # harmonic_multipliers: [1, 2, 3, ..., harmonic_num+1] shape (1, H, 1)
+        harmonic_multipliers = mx.arange(1, self.harmonic_num + 2).reshape(1, -1, 1)
+        # f0 is (B, 1, T), result is (B, H, T)
+        F_mat = f0 * harmonic_multipliers / self.sampling_rate
 
         # Calculate phase
         theta_mat = 2 * math.pi * (mx.cumsum(F_mat, axis=-1) % 1)
 
-        # Random phase offset for each harmonic
+        # Random phase offset for each harmonic (no loop)
         phase_vec = mx.random.uniform(
             low=-math.pi,
             high=math.pi,
             shape=(B, self.harmonic_num + 1, 1)
         )
-        # No phase offset for fundamental (index 0)
-        phase_vec_list = [mx.zeros((B, 1, 1))]
-        for i in range(1, self.harmonic_num + 1):
-            phase_vec_list.append(phase_vec[:, i:i+1, :])
-        phase_vec = mx.concatenate(phase_vec_list, axis=1)
+        # Zero out fundamental frequency phase offset (index 0) using where
+        mask = mx.arange(self.harmonic_num + 1).reshape(1, -1, 1) > 0
+        phase_vec = mx.where(mask, phase_vec, 0.0)
 
         # Generate sine waveforms
         sine_waves = self.sine_amp * mx.sin(theta_mat + phase_vec)
@@ -304,14 +303,17 @@ def stft(x: mx.array, n_fft: int, hop_length: int, window: mx.array) -> tuple:
     # Calculate number of frames
     num_frames = (x_padded.shape[1] - n_fft) // hop_length + 1
 
-    # Create frames
-    frames = []
-    for i in range(num_frames):
-        start = i * hop_length
-        frame = x_padded[:, start:start + n_fft]
-        frames.append(frame)
-
-    frames = mx.stack(frames, axis=2)  # (B, n_fft, num_frames)
+    # Create frames using vectorized slicing (avoid Python loop)
+    # Generate all frame start indices at once
+    frame_starts = mx.arange(num_frames) * hop_length  # (num_frames,)
+    sample_offsets = mx.arange(n_fft)  # (n_fft,)
+    # All indices: (num_frames, n_fft) where indices[f, s] = frame_starts[f] + s
+    all_indices = frame_starts[:, None] + sample_offsets[None, :]  # (num_frames, n_fft)
+    # Gather frames: x_padded is (B, T), gather along axis 1
+    # Result shape: (B, num_frames, n_fft)
+    frames = mx.take(x_padded, all_indices.flatten(), axis=1).reshape(B, num_frames, n_fft)
+    # Transpose to (B, n_fft, num_frames)
+    frames = mx.swapaxes(frames, 1, 2)
 
     # Apply window
     window_expanded = mx.reshape(window, (1, -1, 1))
@@ -386,23 +388,27 @@ def istft(magnitude: mx.array, phase: mx.array, n_fft: int, hop_length: int, win
     window_sum = window_sum.at[indices_flat].add(window_updates)
     window_sum = mx.maximum(window_sum, 1e-8)
 
-    # Process each batch item
-    outputs = []
-    for b in range(B):
-        # frames[b] is (n_fft, num_frames), need (num_frames, n_fft) for indexing
-        frame_data = mx.swapaxes(frames[b], 0, 1)  # (num_frames, n_fft)
-        updates = frame_data.flatten()  # (num_frames * n_fft,)
+    # Vectorized overlap-add for all batch items at once
+    # frames is (B, n_fft, num_frames), need (B, num_frames, n_fft) for indexing
+    frame_data = mx.swapaxes(frames, 1, 2)  # (B, num_frames, n_fft)
+    updates = frame_data.reshape(B, -1)  # (B, num_frames * n_fft)
 
-        # Overlap-add for signal
-        output = mx.zeros(output_length)
-        output = output.at[indices_flat].add(updates)
+    # Use vmap-style vectorized scatter-add via index expansion
+    # Expand indices to (B, num_frames * n_fft) - same indices for all batches
+    output = mx.zeros((B, output_length))
+    # Process with a single batched at[] operation using advanced indexing
+    # batch_indices: [0,0,...,0, 1,1,...,1, ...] for each element
+    batch_indices = mx.repeat(mx.arange(B), num_frames * n_fft)
+    flat_indices = mx.tile(indices_flat, (B,))
+    # Scatter add using 2D indexing
+    flat_output = output.flatten()
+    # Convert 2D indices to 1D: batch * output_length + sample_idx
+    linear_indices = batch_indices * output_length + flat_indices
+    flat_output = flat_output.at[linear_indices].add(updates.flatten())
+    output = flat_output.reshape(B, output_length)
 
-        # Normalize with precomputed window_sum
-        output = output / window_sum
-
-        outputs.append(output)
-
-    output = mx.stack(outputs, axis=0)
+    # Normalize with precomputed window_sum (broadcasts across batch)
+    output = output / window_sum
 
     # Remove padding
     pad_length = n_fft // 2
@@ -551,13 +557,8 @@ class HiFTGenerator(nn.Module):
     def _f0_upsample(self, f0: mx.array) -> mx.array:
         """Upsample F0 using nearest neighbor interpolation."""
         # f0 shape: (B, 1, T)
-        B, C, T = f0.shape
-        new_T = T * self.f0_upsample_scale
-
-        # Simple nearest neighbor upsample
-        indices = mx.arange(new_T) // self.f0_upsample_scale
-        indices = mx.clip(indices, 0, T - 1)
-        return f0[:, :, indices.astype(mx.int32)]
+        # Use mx.repeat for efficient nearest-neighbor upsampling
+        return mx.repeat(f0, self.f0_upsample_scale, axis=2)
 
     def _stft(self, x: mx.array) -> tuple:
         """Perform STFT on input signal."""

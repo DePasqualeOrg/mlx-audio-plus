@@ -4,17 +4,18 @@ import mlx.core as mx
 from mlx_audio.utils import mel_filters, stft
 
 
-def _reflect_pad_1d(x: mx.array, pad_amount: int) -> mx.array:
-    """Reflect pad a 1D array at both ends."""
+def _reflect_pad_2d(x: mx.array, pad_amount: int) -> mx.array:
+    """
+    Reflect pad a 2D array (B, T) along axis 1.
+    Vectorized version that works on entire batch at once.
+    """
     if pad_amount == 0:
         return x
-    # Reflect at start: x[1:pad_amount+1][::-1]
-    prefix = x[1:pad_amount + 1]
-    prefix = prefix[::-1]
-    # Reflect at end: x[-(pad_amount+1):-1][::-1]
-    suffix = x[-(pad_amount + 1):-1]
-    suffix = suffix[::-1]
-    return mx.concatenate([prefix, x, suffix])
+    # Reflect at start: x[:, 1:pad_amount+1][:, ::-1]
+    prefix = x[:, 1:pad_amount + 1][:, ::-1]
+    # Reflect at end: x[:, -(pad_amount+1):-1][:, ::-1]
+    suffix = x[:, -(pad_amount + 1):-1][:, ::-1]
+    return mx.concatenate([prefix, x, suffix], axis=1)
 
 
 def mel_spectrogram(
@@ -49,15 +50,13 @@ def mel_spectrogram(
     if was_1d:
         y = mx.expand_dims(y, 0)
 
-    # Pad signal with reflection (MLX doesn't support reflect mode in pad)
+    # Pad signal with reflection - vectorized for entire batch
     pad_amount = (n_fft - hop_size) // 2
-    y_padded = []
-    for i in range(y.shape[0]):
-        y_padded.append(_reflect_pad_1d(y[i], pad_amount))
-    y = mx.stack(y_padded)
+    y = _reflect_pad_2d(y, pad_amount)
 
     # STFT - process each batch item since shared stft expects 1D
     # Use center=False since we already applied reflection padding above
+    # TODO: Consider batched STFT if mlx_audio.utils.stft supports it
     specs = []
     for i in range(y.shape[0]):
         spec = stft(
