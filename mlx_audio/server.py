@@ -1,6 +1,6 @@
-"""Main module for MLX Audio API server.
+"""Main module for MLX Audio Plus API server.
 
-This module provides a FastAPI-based server for hosting MLX Audio models,
+This module provides a FastAPI-based server for hosting MLX Audio Plus models,
 including Text-to-Speech (TTS), Speech-to-Text (STT), and Speech-to-Speech (S2S) models.
 It offers an OpenAI-compatible API for Audio completions and model management.
 """
@@ -236,7 +236,7 @@ async def stt_transcriptions(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="MLX Audio API server")
+    parser = argparse.ArgumentParser(description="MLX Audio Plus API server")
     parser.add_argument(
         "--allowed-origins",
         nargs="+",
@@ -295,7 +295,7 @@ if __name__ == "__main__":
 
 
 def main():
-    parser = argparse.ArgumentParser(description="MLX Audio API server")
+    parser = argparse.ArgumentParser(description="MLX Audio Plus API server")
     parser.add_argument(
         "--allowed-origins",
         nargs="+",
