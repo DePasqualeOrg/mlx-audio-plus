@@ -303,7 +303,7 @@ def upload_to_hub(path: str, upload_repo: str, hf_path: str):
         ## Use with mlx-audio-plus
 
         ```bash
-        pip install -U git+https://github.com/DePasqualeOrg/mlx-audio-plus.git
+        pip install -U mlx-audio-plus
         ```
 
         ```bash

@@ -14,11 +14,7 @@ This library is a fork of [Blaizzy/mlx-audio](https://github.com/Blaizzy/mlx-aud
 ## Installation
 
 ```bash
-# Install from this fork
-pip install git+https://github.com/DePasqualeOrg/mlx-audio-plus.git
-
-# For API dependencies
-pip install -r requirements.txt
+pip install mlx-audio-plus
 ```
 
 ### Quick Start

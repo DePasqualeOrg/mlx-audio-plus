@@ -219,7 +219,7 @@ The S3Tokenizer weights are from [FunAudioLLM/CosyVoice2-0.5B](https://huggingfa
 ## Use with mlx-audio-plus
 
 ```bash
-pip install -U git+https://github.com/DePasqualeOrg/mlx-audio-plus.git
+pip install -U mlx-audio-plus
 ```
 
 ### Command line
