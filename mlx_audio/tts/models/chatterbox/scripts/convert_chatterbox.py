@@ -228,7 +228,7 @@ pip install -U mlx-audio-plus
 ### Command line
 
 ```bash
-mlx_audio.tts --model {upload_repo} --text "Hello, this is Chatterbox on MLX!" --ref_audio reference.wav --ref_text "."
+mlx_audio.tts --model {upload_repo} --text "Hello, this is Chatterbox on MLX!" --ref_audio reference.wav
 ```
 
 ### Python
@@ -240,7 +240,6 @@ generate_audio(
     text="Hello, this is Chatterbox on MLX!",
     model="{upload_repo}",
     ref_audio="reference.wav",
-    ref_text=".",
     file_prefix="output",
 )
 ```
