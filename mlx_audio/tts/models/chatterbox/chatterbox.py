@@ -664,7 +664,6 @@ class Model(nn.Module):
         voice: Optional[str] = None,
         speed: float = 1.0,
         lang_code: str = "a",
-        ref_text: Optional[str] = None,
         max_tokens: int = None,
         verbose: bool = True,
         stream: bool = False,
@@ -690,7 +689,6 @@ class Model(nn.Module):
             voice: Ignored (Chatterbox uses reference audio for voice cloning)
             speed: Ignored (Chatterbox doesn't support speed adjustment)
             lang_code: Ignored (Chatterbox is English-only)
-            ref_text: Ignored (Chatterbox doesn't use reference text)
             max_tokens: Alias for max_new_tokens
             verbose: Whether to print verbose output
             stream: Ignored (Chatterbox doesn't support streaming)
