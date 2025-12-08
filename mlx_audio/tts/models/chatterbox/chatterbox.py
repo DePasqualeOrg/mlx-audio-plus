@@ -401,9 +401,7 @@ class Model(nn.Module):
             self.s3_tokenizer = S3TokenizerV2("speech_tokenizer_v2_25hz")
         if hasattr(self.s3_tokenizer, "sanitize"):
             s3tok_weights_dict = self.s3_tokenizer.sanitize(s3tok_weights_dict)
-        self.s3_tokenizer.load_weights(
-            list(s3tok_weights_dict.items()), strict=False
-        )
+        self.s3_tokenizer.load_weights(list(s3tok_weights_dict.items()), strict=False)
 
         # Handle any remaining weights at the top level
         if other_weights and strict:
@@ -449,7 +447,11 @@ class Model(nn.Module):
             ckpt_dir = Path(
                 snapshot_download(
                     repo_id=str(ckpt_dir),
-                    allow_patterns=["model.safetensors", "tokenizer.json", "config.json"],
+                    allow_patterns=[
+                        "model.safetensors",
+                        "tokenizer.json",
+                        "config.json",
+                    ],
                 )
             )
 

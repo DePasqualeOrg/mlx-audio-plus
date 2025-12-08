@@ -12,6 +12,107 @@ from .matcha.decoder import (
 from .matcha.transformer import BasicTransformerBlock
 
 
+def subsequent_chunk_mask(
+    size: int,
+    chunk_size: int,
+    num_left_chunks: int = -1,
+) -> mx.array:
+    """Create mask for subsequent steps (size, size) with chunk size.
+
+    This is for streaming encoder with chunk-based attention.
+
+    Args:
+        size: size of mask
+        chunk_size: size of chunk
+        num_left_chunks: number of left chunks
+            <0: use full chunk
+            >=0: use num_left_chunks
+
+    Returns:
+        Mask tensor (size, size) where True = attend, False = mask
+
+    Examples:
+        >>> subsequent_chunk_mask(4, 2)
+        [[1, 1, 0, 0],
+         [1, 1, 0, 0],
+         [1, 1, 1, 1],
+         [1, 1, 1, 1]]
+    """
+    pos_idx = mx.arange(size)
+    block_value = ((pos_idx // chunk_size) + 1) * chunk_size
+    ret = mx.expand_dims(pos_idx, 0) < mx.expand_dims(block_value, 1)
+    return ret
+
+
+def add_optional_chunk_mask(
+    xs: mx.array,
+    masks: mx.array,
+    use_dynamic_chunk: bool,
+    use_dynamic_left_chunk: bool,
+    decoding_chunk_size: int,
+    static_chunk_size: int,
+    num_decoding_left_chunks: int,
+) -> mx.array:
+    """Apply optional chunk mask for causal attention.
+
+    Args:
+        xs: padded input, (B, T, C)
+        masks: mask for xs, (B, 1, T) - True = valid, False = padded
+        use_dynamic_chunk: whether to use dynamic chunk
+        use_dynamic_left_chunk: whether to use dynamic left chunk
+        decoding_chunk_size: decoding chunk size for dynamic chunk
+        static_chunk_size: chunk size for static chunk (used when > 0)
+        num_decoding_left_chunks: number of left chunks
+
+    Returns:
+        chunk mask of shape (B, T, T) where True = attend, False = mask
+    """
+    if use_dynamic_chunk:
+        max_len = xs.shape[1]
+        if decoding_chunk_size < 0:
+            chunk_size = max_len
+            num_left_chunks = -1
+        elif decoding_chunk_size > 0:
+            chunk_size = decoding_chunk_size
+            num_left_chunks = num_decoding_left_chunks
+        else:
+            # For training, use full context
+            chunk_size = max_len
+            num_left_chunks = -1
+
+        chunk_masks = subsequent_chunk_mask(xs.shape[1], chunk_size, num_left_chunks)
+        chunk_masks = mx.expand_dims(chunk_masks, 0)  # (1, T, T)
+        chunk_masks = masks & chunk_masks  # (B, T, T)
+    elif static_chunk_size > 0:
+        num_left_chunks = num_decoding_left_chunks
+        chunk_masks = subsequent_chunk_mask(
+            xs.shape[1], static_chunk_size, num_left_chunks
+        )
+        chunk_masks = mx.expand_dims(chunk_masks, 0)  # (1, T, T)
+        chunk_masks = masks & chunk_masks  # (B, T, T)
+    else:
+        # Full attention - broadcast masks to (B, T, T)
+        chunk_masks = mx.broadcast_to(masks, (masks.shape[0], xs.shape[1], xs.shape[1]))
+
+    return chunk_masks
+
+
+def mask_to_bias(mask: mx.array, dtype: mx.Dtype) -> mx.array:
+    """Convert boolean mask to additive attention bias.
+
+    Args:
+        mask: Boolean mask where True = attend, False = mask out
+        dtype: Output dtype
+
+    Returns:
+        Additive bias where masked positions have large negative values
+    """
+    mask = mask.astype(dtype)
+    # attention mask bias: 0 for attend, -1e10 for mask
+    bias = (1.0 - mask) * -1.0e10
+    return bias
+
+
 class CausalConv1d(nn.Module):
     """Causal 1D convolution with left padding."""
 
@@ -146,12 +247,16 @@ class ConditionalDecoder(nn.Module):
         num_mid_blocks: int = 12,
         num_heads: int = 8,
         act_fn: str = "gelu",
+        static_chunk_size: int = 50,
+        num_decoding_left_chunks: int = 2,
     ):
         super().__init__()
         channels = tuple(channels)
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.causal = causal
+        self.static_chunk_size = static_chunk_size
+        self.num_decoding_left_chunks = num_decoding_left_chunks
 
         # Time embeddings
         self.time_embeddings = SinusoidalPosEmb(in_channels)
@@ -276,6 +381,7 @@ class ConditionalDecoder(nn.Module):
         t: mx.array,
         spks: mx.array = None,
         cond: mx.array = None,
+        streaming: bool = False,
     ) -> mx.array:
         """
         Forward pass.
@@ -287,13 +393,14 @@ class ConditionalDecoder(nn.Module):
             t: Timestep (B,)
             spks: Speaker embeddings (B, spk_dim)
             cond: Additional conditioning
+            streaming: Whether to use streaming (chunk-based) attention masking
 
         Returns:
             Predicted noise (B, out_channels, T)
         """
         # Time embedding
-        t = self.time_embeddings(t)
-        t = self.time_mlp(t)
+        t_emb = self.time_embeddings(t)
+        t_emb = self.time_mlp(t_emb)
 
         # Concatenate conditioning
         x = mx.concatenate([x, mu], axis=1)
@@ -310,12 +417,39 @@ class ConditionalDecoder(nn.Module):
         masks = [mask]
         for down_block in self.down_blocks:
             mask_down = masks[-1]
-            x = down_block.resnet(x, mask_down, t)
+            x = down_block.resnet(x, mask_down, t_emb)
 
-            # Transformer blocks
+            # Transformer blocks with attention mask
             x_t = mx.swapaxes(x, 1, 2)  # (B, C, T) -> (B, T, C)
+
+            # Compute attention mask based on streaming mode
+            if streaming:
+                # Use chunk-based causal attention for streaming
+                attn_mask = add_optional_chunk_mask(
+                    x_t,
+                    mask_down.astype(mx.bool_),
+                    False,
+                    False,
+                    0,
+                    self.static_chunk_size,
+                    -1,
+                )
+            else:
+                # Use full context attention (non-streaming)
+                # Expand mask_down to (B, T, T) for full attention
+                attn_mask = add_optional_chunk_mask(
+                    x_t, mask_down.astype(mx.bool_), False, False, 0, 0, -1
+                )
+                # Repeat along query dimension for proper broadcasting
+                attn_mask = mx.broadcast_to(
+                    attn_mask, (attn_mask.shape[0], x_t.shape[1], attn_mask.shape[2])
+                )
+
+            # Convert boolean mask to additive bias
+            attn_bias = mask_to_bias(attn_mask, x_t.dtype)
+
             for transformer_block in down_block.transformer_blocks:
-                x_t = transformer_block(x_t, attention_mask=None, timestep=t)
+                x_t = transformer_block(x_t, attention_mask=attn_bias, timestep=t_emb)
             x = mx.swapaxes(x_t, 1, 2)  # (B, T, C) -> (B, C, T)
 
             hiddens.append(x)
@@ -328,11 +462,33 @@ class ConditionalDecoder(nn.Module):
 
         # Mid blocks
         for mid_block in self.mid_blocks:
-            x = mid_block.resnet(x, mask_mid, t)
+            x = mid_block.resnet(x, mask_mid, t_emb)
 
             x_t = mx.swapaxes(x, 1, 2)
+
+            # Compute attention mask for mid blocks
+            if streaming:
+                attn_mask = add_optional_chunk_mask(
+                    x_t,
+                    mask_mid.astype(mx.bool_),
+                    False,
+                    False,
+                    0,
+                    self.static_chunk_size,
+                    -1,
+                )
+            else:
+                attn_mask = add_optional_chunk_mask(
+                    x_t, mask_mid.astype(mx.bool_), False, False, 0, 0, -1
+                )
+                attn_mask = mx.broadcast_to(
+                    attn_mask, (attn_mask.shape[0], x_t.shape[1], attn_mask.shape[2])
+                )
+
+            attn_bias = mask_to_bias(attn_mask, x_t.dtype)
+
             for transformer_block in mid_block.transformer_blocks:
-                x_t = transformer_block(x_t, attention_mask=None, timestep=t)
+                x_t = transformer_block(x_t, attention_mask=attn_bias, timestep=t_emb)
             x = mx.swapaxes(x_t, 1, 2)
 
         # Up blocks
@@ -341,11 +497,33 @@ class ConditionalDecoder(nn.Module):
             skip = hiddens.pop()
             # Truncate x to match skip length
             x = mx.concatenate([x[:, :, : skip.shape[-1]], skip], axis=1)
-            x = up_block.resnet(x, mask_up, t)
+            x = up_block.resnet(x, mask_up, t_emb)
 
             x_t = mx.swapaxes(x, 1, 2)
+
+            # Compute attention mask for up blocks
+            if streaming:
+                attn_mask = add_optional_chunk_mask(
+                    x_t,
+                    mask_up.astype(mx.bool_),
+                    False,
+                    False,
+                    0,
+                    self.static_chunk_size,
+                    -1,
+                )
+            else:
+                attn_mask = add_optional_chunk_mask(
+                    x_t, mask_up.astype(mx.bool_), False, False, 0, 0, -1
+                )
+                attn_mask = mx.broadcast_to(
+                    attn_mask, (attn_mask.shape[0], x_t.shape[1], attn_mask.shape[2])
+                )
+
+            attn_bias = mask_to_bias(attn_mask, x_t.dtype)
+
             for transformer_block in up_block.transformer_blocks:
-                x_t = transformer_block(x_t, attention_mask=None, timestep=t)
+                x_t = transformer_block(x_t, attention_mask=attn_bias, timestep=t_emb)
             x = mx.swapaxes(x_t, 1, 2)
 
             x = up_block.upsample(x * mask_up)

@@ -52,7 +52,7 @@ class ConditionalCFM(BASECFM):
             Tuple of (generated_mel, flow_cache)
         """
         if flow_cache is None:
-            flow_cache = mx.zeros((1, 80, 0, 2))
+            flow_cache = mx.zeros((1, self.n_feats, 0, 2))
 
         z = mx.random.normal(mu.shape) * temperature
         cache_size = flow_cache.shape[2]
@@ -93,14 +93,10 @@ class ConditionalCFM(BASECFM):
 
         sol = []
 
-        # Prepare batch for CFG
+        # Prepare batch for CFG (defaults for when spks/cond are None)
         T_len = x.shape[2]
-        x_in = mx.zeros((2, 80, T_len))
-        mask_in = mx.zeros((2, 1, T_len))
-        mu_in = mx.zeros((2, 80, T_len))
-        t_in = mx.zeros(2)
-        spks_in = mx.zeros((2, 80))
-        cond_in = mx.zeros((2, 80, T_len))
+        spks_in = mx.zeros((2, self.spk_emb_dim))
+        cond_in = mx.zeros((2, self.n_feats, T_len))
 
         for step in range(1, len(t_span)):
             # Prepare inputs for CFG
@@ -136,6 +132,9 @@ class ConditionalCFM(BASECFM):
 class CausalConditionalCFM(ConditionalCFM):
     """Causal Conditional Flow Matching with fixed noise."""
 
+    # Mel output channels - must match PyTorch's hardcoded value
+    MEL_CHANNELS = 80
+
     def __init__(
         self,
         in_channels: int = 240,
@@ -146,7 +145,10 @@ class CausalConditionalCFM(ConditionalCFM):
     ):
         super().__init__(in_channels, cfm_params, n_spks, spk_emb_dim, estimator)
         # Pre-generate random noise for deterministic generation
-        self.rand_noise = mx.random.normal((1, 80, 50 * 300))
+        # CRITICAL: Must use 80 (mel output channels), not n_feats (240)
+        # PyTorch: set_all_random_seed(0); torch.randn([1, 80, 50 * 300])
+        mx.random.seed(0)  # Match PyTorch's deterministic seed
+        self.rand_noise = mx.random.normal((1, self.MEL_CHANNELS, 50 * 300))
 
     def __call__(
         self,
@@ -156,9 +158,13 @@ class CausalConditionalCFM(ConditionalCFM):
         temperature: float = 1.0,
         spks: mx.array = None,
         cond: mx.array = None,
+        streaming: bool = False,
     ) -> tuple:
         """
         Forward diffusion with fixed noise for causal generation.
+
+        Args:
+            streaming: Unused, kept for API compatibility with flow.py
 
         Returns:
             Tuple of (generated_mel, None)

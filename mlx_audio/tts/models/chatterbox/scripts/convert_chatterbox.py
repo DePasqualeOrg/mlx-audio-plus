@@ -452,7 +452,9 @@ def convert_all(
     print(f"  Added {len(s3gen_weights)} S3Gen weights")
 
     # Note: S3Tokenizer is NOT included - it's in a separate repo (mlx-community/S3TokenizerV2)
-    print("\nNote: S3Tokenizer weights are loaded separately from mlx-community/S3TokenizerV2")
+    print(
+        "\nNote: S3Tokenizer weights are loaded separately from mlx-community/S3TokenizerV2"
+    )
 
     # Apply quantization if requested
     if quantize:
@@ -469,7 +471,9 @@ def convert_all(
         # Split and load weights by component
         ve_w = {k[3:]: v for k, v in all_weights_mx.items() if k.startswith("ve.")}
         t3_w = {k[3:]: v for k, v in all_weights_mx.items() if k.startswith("t3.")}
-        s3gen_w = {k[6:]: v for k, v in all_weights_mx.items() if k.startswith("s3gen.")}
+        s3gen_w = {
+            k[6:]: v for k, v in all_weights_mx.items() if k.startswith("s3gen.")
+        }
 
         ve_model.load_weights(list(ve_w.items()), strict=False)
         t3_model.load_weights(list(t3_w.items()), strict=False)
@@ -544,10 +548,52 @@ def convert_all(
         print(f"  {f.name}: {size_mb:.1f} MB")
 
     # Upload to Hugging Face if requested (and not dry run)
-    if not dry_run:
+    if upload_repo and not dry_run:
         upload_to_hub(output_dir, upload_repo)
-    else:
-        print(f"\n📁 To upload to {upload_repo}, run with --upload-repo")
+    elif upload_repo:
+        print(f"\n📁 Dry run - to upload to {upload_repo}, run without --dry-run")
+
+
+def convert_from_source(
+    model_id: str = "ResembleAI/chatterbox",
+    output_dir: Path = None,
+    quantize: bool = False,
+    q_bits: int = 4,
+    q_group_size: int = 64,
+    upload_repo: str = None,
+    dry_run: bool = False,
+) -> None:
+    """
+    Convert Chatterbox PyTorch weights to MLX format.
+
+    This function is called by the central conversion utility when it detects
+    a Chatterbox model, or can be called directly.
+
+    Args:
+        model_id: HuggingFace model ID (default: ResembleAI/chatterbox)
+        output_dir: Output directory for MLX weights
+        quantize: Whether to quantize weights
+        q_bits: Quantization bits (default: 4)
+        q_group_size: Quantization group size (default: 64)
+        upload_repo: HuggingFace repo to upload to
+        dry_run: Generate files but skip upload
+    """
+    if output_dir is None:
+        suffix = f"{q_bits}bit" if quantize else "fp16"
+        output_dir = Path(f"./Chatterbox-TTS-{suffix}")
+
+    output_dir = Path(output_dir)
+
+    # Call the existing convert_all function
+    convert_all(
+        output_dir=output_dir,
+        cache_dir=None,  # Use default cache
+        upload_repo=upload_repo if not dry_run else None,
+        quantize=quantize,
+        bits=q_bits,
+        group_size=q_group_size,
+        dry_run=dry_run,
+    )
 
 
 def main():

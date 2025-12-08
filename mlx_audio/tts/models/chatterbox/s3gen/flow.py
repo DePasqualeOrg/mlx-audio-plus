@@ -20,6 +20,7 @@ class CausalMaskedDiffWithXvec(nn.Module):
         only_mask_loss: bool = True,
         token_mel_ratio: int = 2,
         pre_lookahead_len: int = 3,
+        n_timesteps: int = 10,
         encoder: nn.Module = None,
         decoder: nn.Module = None,
         decoder_conf: Dict = None,
@@ -36,6 +37,7 @@ class CausalMaskedDiffWithXvec(nn.Module):
             only_mask_loss: Whether to use only masked loss
             token_mel_ratio: Ratio of tokens to mel frames (after upsampling)
             pre_lookahead_len: Length of lookahead window
+            n_timesteps: Number of diffusion timesteps for flow matching
             encoder: UpsampleConformerEncoder instance
             decoder: ConditionalDecoder instance
             decoder_conf: Decoder configuration dict
@@ -49,6 +51,7 @@ class CausalMaskedDiffWithXvec(nn.Module):
         self.vocab_size = vocab_size
         self.output_type = output_type
         self.input_frame_rate = input_frame_rate
+        self.n_timesteps = n_timesteps
 
         self.input_embedding = nn.Embedding(vocab_size, input_size)
         self.spk_embed_affine_layer = nn.Linear(spk_embed_dim, output_size)
@@ -69,6 +72,8 @@ class CausalMaskedDiffWithXvec(nn.Module):
         prompt_feat_len: mx.array,
         embedding: mx.array,
         finalize: bool,
+        n_timesteps: Optional[int] = None,
+        streaming: bool = False,
     ):
         """
         Inference for streaming TTS.
@@ -82,6 +87,8 @@ class CausalMaskedDiffWithXvec(nn.Module):
             prompt_feat_len: Prompt feature lengths (1,)
             embedding: Speaker embedding (1, spk_embed_dim)
             finalize: Whether this is the final chunk
+            n_timesteps: Number of diffusion timesteps (defaults to self.n_timesteps)
+            streaming: Whether to use streaming (chunk-based) attention masking
 
         Returns:
             feat: Generated mel features (1, D, T_mel)
@@ -90,9 +97,9 @@ class CausalMaskedDiffWithXvec(nn.Module):
         assert token.shape[0] == 1
 
         # Speaker embedding projection
-        embedding = embedding / mx.linalg.norm(
-            embedding, axis=1, keepdims=True
-        )  # Normalize
+        # Add epsilon to prevent division by zero when embedding is zero
+        norm = mx.linalg.norm(embedding, axis=1, keepdims=True)
+        embedding = embedding / (norm + 1e-8)  # Normalize with epsilon
         embedding = self.spk_embed_affine_layer(embedding)
 
         # Concatenate prompt and new tokens
@@ -115,8 +122,8 @@ class CausalMaskedDiffWithXvec(nn.Module):
         token = mx.clip(token, 0, num_embeddings - 1)
         token = self.input_embedding(token) * mask
 
-        # Encode
-        h, h_lengths = self.encoder(token, token_len)
+        # Encode - pass streaming parameter to encoder for proper attention masking
+        h, h_lengths = self.encoder(token, token_len, streaming=streaming)
 
         # Trim lookahead for streaming (unless finalizing)
         if not finalize:
@@ -135,13 +142,14 @@ class CausalMaskedDiffWithXvec(nn.Module):
         total_len = mel_len1 + mel_len2
         mask = mx.ones([1, 1, total_len], dtype=h.dtype)
 
-        # Generate mel features
+        # Generate mel features with streaming parameter
         feat, _ = self.decoder(
             mu=mx.transpose(h, [0, 2, 1]),
             mask=mask,
             spks=embedding,
             cond=conds,
-            n_timesteps=10,
+            n_timesteps=n_timesteps if n_timesteps is not None else self.n_timesteps,
+            streaming=streaming,
         )
 
         # Extract only the new portion (after prompt)

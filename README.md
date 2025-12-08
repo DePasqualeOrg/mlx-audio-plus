@@ -4,6 +4,7 @@ In addition to the models from [Blaizzy/mlx-audio](https://github.com/Blaizzy/ml
 
 - TTS
   - [Chatterbox](https://github.com/resemble-ai/chatterbox)
+  - [CosyVoice2](https://huggingface.co/FunAudioLLM/CosyVoice2-0.5B)
 
 ### Installation
 

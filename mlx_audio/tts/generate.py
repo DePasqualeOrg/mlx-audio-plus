@@ -271,7 +271,23 @@ def generate_audio(
             ref_audio = load_audio(
                 ref_audio, sample_rate=model.sample_rate, volume_normalize=normalize
             )
-            if not ref_text:
+            # Only auto-transcribe if:
+            # 1. ref_text is not provided
+            # 2. instruct_text is not provided (instruct mode doesn't need transcription)
+            # 3. source_audio is not provided (VC mode doesn't need transcription)
+            # 4. The model supports ref_text parameter
+            # 5. The model is NOT CosyVoice2 (cross-lingual mode is preferred, doesn't need transcription)
+            instruct_text = kwargs.get("instruct_text")
+            source_audio = kwargs.get("source_audio")
+            is_cosyvoice2 = (
+                hasattr(model, "model_type") and model.model_type() == "cosyvoice2"
+            )
+            if (
+                not ref_text
+                and not instruct_text
+                and not source_audio
+                and not is_cosyvoice2
+            ):
                 import inspect
 
                 if "ref_text" in inspect.signature(model.generate).parameters:
@@ -288,6 +304,20 @@ def generate_audio(
                     del stt_model
                     mx.clear_cache()
                     print(f"\033[94mRef_text:\033[0m {ref_text}")
+
+        # Load source audio for voice conversion if specified
+        source_audio = kwargs.get("source_audio")
+        if source_audio:
+            if isinstance(source_audio, str):
+                if not os.path.exists(source_audio):
+                    raise FileNotFoundError(
+                        f"Source audio file not found: {source_audio}"
+                    )
+
+                source_audio = load_audio(
+                    source_audio, sample_rate=model.sample_rate, volume_normalize=False
+                )
+                kwargs["source_audio"] = source_audio
 
         # Load AudioPlayer
         player = AudioPlayer(sample_rate=model.sample_rate) if play else None
@@ -417,6 +447,18 @@ def parse_args():
         "--ref_text", type=str, default=None, help="Caption for reference audio"
     )
     parser.add_argument(
+        "--instruct_text",
+        type=str,
+        default=None,
+        help="Style instruction for CosyVoice2 instruct mode (e.g., 'Speak slowly and calmly')",
+    )
+    parser.add_argument(
+        "--source_audio",
+        type=str,
+        default=None,
+        help="Path to source audio for voice conversion (CosyVoice2 VC mode). Converts source audio content to target speaker voice (requires --ref_audio)",
+    )
+    parser.add_argument(
         "--stt_model",
         type=str,
         default="mlx-community/whisper-large-v3-turbo",
@@ -448,7 +490,10 @@ def parse_args():
     args = parser.parse_args()
 
     if args.text is None:
-        if not sys.stdin.isatty():
+        # Voice conversion mode doesn't need text
+        if args.source_audio:
+            args.text = ""
+        elif not sys.stdin.isatty():
             args.text = sys.stdin.read().strip()
         else:
             print("Please enter the text to generate:")

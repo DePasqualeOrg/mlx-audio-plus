@@ -16,6 +16,10 @@ from mlx_lm.utils import dequantize_model, quantize_model, save_config, save_mod
 from transformers import AutoConfig
 
 MODEL_REMAPPING = {"outetts": "outetts", "spark": "spark", "csm": "sesame"}
+
+# Models that require custom conversion from PyTorch source weights
+# These models have a convert_from_source() function in their module
+MODELS_WITH_CUSTOM_CONVERSION = {"cosyvoice2", "chatterbox"}
 MAX_FILE_SIZE_GB = 5
 MODEL_CONVERSION_DTYPES = ["float16", "bfloat16", "float32"]
 
@@ -325,6 +329,31 @@ def upload_to_hub(path: str, upload_repo: str, hf_path: str):
     print(f"Upload successful, go to https://huggingface.co/{upload_repo} for details.")
 
 
+def _detect_model_type_from_path(hf_path: str) -> Optional[str]:
+    """Detect model type from HuggingFace path or local path.
+
+    Args:
+        hf_path: HuggingFace repo ID or local path
+
+    Returns:
+        Model type string if detected, None otherwise
+    """
+    path_lower = hf_path.lower()
+    available_models = get_available_models()
+
+    # Check each available model type
+    for model_type in available_models:
+        if model_type in path_lower:
+            return model_type
+
+    # Check remapping
+    for key, value in MODEL_REMAPPING.items():
+        if key in path_lower:
+            return value
+
+    return None
+
+
 def convert(
     hf_path: str,
     mlx_path: str = "mlx_model",
@@ -338,6 +367,35 @@ def convert(
     trust_remote_code: bool = True,
     quant_predicate: Optional[str] = None,
 ):
+    # Check if this model requires custom conversion from PyTorch source
+    detected_model_type = _detect_model_type_from_path(hf_path)
+    if detected_model_type in MODELS_WITH_CUSTOM_CONVERSION:
+        print(f"[INFO] Model type '{detected_model_type}' requires custom conversion")
+        try:
+            arch = importlib.import_module(
+                f"mlx_audio.tts.models.{detected_model_type}"
+            )
+            if hasattr(arch, "convert_from_source"):
+                print(f"[INFO] Using custom converter for {detected_model_type}")
+                arch.convert_from_source(
+                    model_id=hf_path,
+                    output_dir=Path(mlx_path),
+                    quantize=quantize,
+                    q_bits=q_bits,
+                    q_group_size=q_group_size,
+                    dtype=dtype,
+                    upload_repo=upload_repo,
+                )
+                return
+            else:
+                print(
+                    f"[WARN] No convert_from_source() found for {detected_model_type}, using standard conversion"
+                )
+        except ImportError as e:
+            print(
+                f"[WARN] Could not import {detected_model_type}: {e}, using standard conversion"
+            )
+
     print("[INFO] Loading")
     model_path = get_model_path(hf_path, revision=revision)
     model, config = fetch_from_hub(

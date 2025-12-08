@@ -76,9 +76,30 @@ class Snake(nn.Module):
             alpha = mx.exp(alpha)
 
         # Snake activation: x + (1/α) * sin²(αx)
-        return x + (1.0 / (alpha + self.no_div_by_zero)) * mx.power(
-            mx.sin(x * alpha), 2
-        )
+        # The original PyTorch code uses: 1 / (alpha + 1e-9)
+        # This preserves the sign of alpha (negative alpha SUBTRACTS the periodic component)
+        #
+        # For fp16 safety, we need to clamp |alpha| to prevent overflow when |1/alpha| > 65504
+        # But we must preserve the sign for correct behavior with negative alpha
+        #
+        # Strategy: clamp magnitude while preserving sign using sign(alpha) * max(|alpha|, min_val)
+        no_div_by_zero = 1e-9
+        min_alpha = 1e-4  # 1/1e-4 = 10000, safe for fp16
+
+        # Preserve sign while clamping magnitude
+        alpha_sign = mx.sign(alpha)
+        alpha_abs = mx.abs(alpha)
+
+        # Clamp to avoid division by near-zero, but preserve sign
+        # For very small |alpha|, use sign * min_alpha (or just min_alpha if alpha is tiny)
+        # This matches PyTorch behavior: 1/(alpha + 1e-9) where alpha can be negative
+        alpha_clamped = alpha_sign * mx.maximum(alpha_abs, min_alpha)
+
+        # Handle the case where alpha is extremely close to zero (sign might be 0)
+        # In this case, use positive min_alpha
+        alpha_clamped = mx.where(alpha_abs < no_div_by_zero, min_alpha, alpha_clamped)
+
+        return x + (1.0 / alpha_clamped) * mx.power(mx.sin(x * alpha), 2)
 
 
 class ResBlock(nn.Module):
@@ -145,6 +166,35 @@ class ResBlock(nn.Module):
         return x
 
 
+def _linear_interpolate_1d_to_size(x: mx.array, new_size: int) -> mx.array:
+    """
+    1D linear interpolation along the last axis to a specific size.
+
+    Args:
+        x: Input tensor of shape (..., T)
+        new_size: Target size for the last dimension
+
+    Returns:
+        Interpolated tensor of shape (..., new_size)
+    """
+    T = x.shape[-1]
+    if new_size == T:
+        return x
+
+    # Create new sample positions
+    new_positions = mx.linspace(0, T - 1, new_size)
+    indices_low = mx.floor(new_positions).astype(mx.int32)
+    indices_high = mx.minimum(indices_low + 1, T - 1)
+    weights = new_positions - indices_low.astype(x.dtype)
+
+    # Gather and interpolate
+    # x is (..., T), we interpolate along last axis
+    low_vals = mx.take(x, indices_low, axis=-1)
+    high_vals = mx.take(x, indices_high, axis=-1)
+
+    return low_vals + weights * (high_vals - low_vals)
+
+
 class SineGen(nn.Module):
     """
     Sine wave generator for harmonic synthesis.
@@ -159,6 +209,8 @@ class SineGen(nn.Module):
         sine_amp: float = 0.1,
         noise_std: float = 0.003,
         voiced_threshold: float = 0,
+        use_interpolation: bool = False,
+        upsample_scale: int = 1,
     ):
         """
         Args:
@@ -167,6 +219,8 @@ class SineGen(nn.Module):
             sine_amp: Amplitude of sine waveform
             noise_std: Standard deviation of Gaussian noise
             voiced_threshold: F0 threshold for voiced/unvoiced classification
+            use_interpolation: Use interpolation-based phase computation
+            upsample_scale: Upsample scale (required when use_interpolation=True)
         """
         super().__init__()
         self.sine_amp = sine_amp
@@ -174,10 +228,55 @@ class SineGen(nn.Module):
         self.harmonic_num = harmonic_num
         self.sampling_rate = samp_rate
         self.voiced_threshold = voiced_threshold
+        self.use_interpolation = use_interpolation
+        self.upsample_scale = upsample_scale
 
     def _f02uv(self, f0: mx.array) -> mx.array:
         """Convert F0 to voiced/unvoiced signal."""
         return (f0 > self.voiced_threshold).astype(mx.float32)
+
+    def _f02sine_interpolation(self, f0_values: mx.array) -> mx.array:
+        """
+        Compute sine waves using interpolation-based phase computation.
+
+        This approach downsamples, computes phase at lower rate, then upsamples.
+        Used for higher sample rates (e.g., 24kHz).
+
+        Args:
+            f0_values: Frequency values (B, T, H) where H is num harmonics
+
+        Returns:
+            Sine waves (B, T, H)
+        """
+        B, T, H = f0_values.shape
+
+        # Convert to radians per sample (normalized frequency)
+        rad_values = (f0_values / self.sampling_rate) % 1
+
+        # Add random initial phase for harmonics (not fundamental)
+        rand_ini = mx.random.uniform(shape=(B, H))
+        rand_ini = mx.concatenate([mx.zeros((B, 1)), rand_ini[:, 1:]], axis=1)
+        rad_values = rad_values.at[:, 0, :].add(rand_ini)
+
+        # Downsample rad_values: (B, T, H) -> (B, T', H)
+        # Transpose to (B, H, T) for interpolation along T axis
+        rad_values_t = mx.swapaxes(rad_values, 1, 2)  # (B, H, T)
+        T_down = max(1, T // self.upsample_scale)
+        rad_values_down = _linear_interpolate_1d_to_size(
+            rad_values_t, new_size=T_down
+        )  # (B, H, T')
+        rad_values_down = mx.swapaxes(rad_values_down, 1, 2)  # (B, T', H)
+
+        # Cumsum at lower rate
+        phase = mx.cumsum(rad_values_down, axis=1) * 2 * math.pi
+
+        # Upsample phase back to original length T: (B, T', H) -> (B, T, H)
+        # Scale phase by upsample_scale before interpolation
+        phase_t = mx.swapaxes(phase, 1, 2) * self.upsample_scale  # (B, H, T')
+        phase_up = _linear_interpolate_1d_to_size(phase_t, new_size=T)  # (B, H, T)
+        phase_up = mx.swapaxes(phase_up, 1, 2)  # (B, T, H)
+
+        return mx.sin(phase_up)
 
     def __call__(self, f0: mx.array) -> tuple:
         """
@@ -197,19 +296,29 @@ class SineGen(nn.Module):
         # f0 is (B, 1, T), result is (B, H, T)
         F_mat = f0 * harmonic_multipliers / self.sampling_rate
 
-        # Calculate phase
-        theta_mat = 2 * math.pi * (mx.cumsum(F_mat, axis=-1) % 1)
+        if self.use_interpolation:
+            # Interpolation-based phase computation (for higher sample rates)
+            # F_mat is (B, H, T), need (B, T, H) for _f02sine_interpolation
+            fn = mx.swapaxes(f0, 1, 2) * mx.arange(
+                1, self.harmonic_num + 2
+            )  # (B, T, H)
+            sine_waves = self._f02sine_interpolation(fn) * self.sine_amp
+            # Output is (B, T, H), convert to (B, H, T)
+            sine_waves = mx.swapaxes(sine_waves, 1, 2)
+        else:
+            # Direct cumsum phase computation (original approach)
+            theta_mat = 2 * math.pi * (mx.cumsum(F_mat, axis=-1) % 1)
 
-        # Random phase offset for each harmonic (no loop)
-        phase_vec = mx.random.uniform(
-            low=-math.pi, high=math.pi, shape=(B, self.harmonic_num + 1, 1)
-        )
-        # Zero out fundamental frequency phase offset (index 0) using where
-        mask = mx.arange(self.harmonic_num + 1).reshape(1, -1, 1) > 0
-        phase_vec = mx.where(mask, phase_vec, 0.0)
+            # Random phase offset for each harmonic (no loop)
+            phase_vec = mx.random.uniform(
+                low=-math.pi, high=math.pi, shape=(B, self.harmonic_num + 1, 1)
+            )
+            # Zero out fundamental frequency phase offset (index 0) using where
+            mask = mx.arange(self.harmonic_num + 1).reshape(1, -1, 1) > 0
+            phase_vec = mx.where(mask, phase_vec, 0.0)
 
-        # Generate sine waveforms
-        sine_waves = self.sine_amp * mx.sin(theta_mat + phase_vec)
+            # Generate sine waveforms
+            sine_waves = self.sine_amp * mx.sin(theta_mat + phase_vec)
 
         # Generate voiced/unvoiced signal
         uv = self._f02uv(f0)
@@ -239,14 +348,31 @@ class SourceModuleHnNSF(nn.Module):
         sine_amp: float = 0.1,
         add_noise_std: float = 0.003,
         voiced_threshod: float = 0,
+        use_interpolation: bool = False,
     ):
+        """
+        Args:
+            sampling_rate: Audio sampling rate in Hz
+            upsample_scale: Total upsample scale from mel to waveform
+            harmonic_num: Number of harmonic overtones
+            sine_amp: Amplitude of sine waveform
+            add_noise_std: Standard deviation of additive noise
+            voiced_threshod: F0 threshold for voiced/unvoiced classification
+            use_interpolation: Use interpolation-based phase computation
+        """
         super().__init__()
         self.sine_amp = sine_amp
         self.noise_std = add_noise_std
 
         # Sine generator for harmonics
         self.l_sin_gen = SineGen(
-            sampling_rate, harmonic_num, sine_amp, add_noise_std, voiced_threshod
+            sampling_rate,
+            harmonic_num,
+            sine_amp,
+            add_noise_std,
+            voiced_threshod,
+            use_interpolation=use_interpolation,
+            upsample_scale=upsample_scale,
         )
 
         # Linear layer to merge harmonics
@@ -291,9 +417,14 @@ def stft(x: mx.array, n_fft: int, hop_length: int, window: mx.array) -> tuple:
     """
     B, T = x.shape
 
-    # Pad signal
+    # Pad signal with reflect padding to match PyTorch's torch.stft behavior
     pad_length = n_fft // 2
-    x_padded = mx.pad(x, [(0, 0), (pad_length, pad_length)])
+    # Reflect padding: mirror the signal at the edges
+    # Left pad: reverse of x[:, 1:pad_length+1]
+    # Right pad: reverse of x[:, -(pad_length+1):-1]
+    left_pad = x[:, 1 : pad_length + 1][:, ::-1]
+    right_pad = x[:, -(pad_length + 1) : -1][:, ::-1]
+    x_padded = mx.concatenate([left_pad, x, right_pad], axis=1)
 
     # Calculate number of frames
     num_frames = (x_padded.shape[1] - n_fft) // hop_length + 1
@@ -445,6 +576,7 @@ class HiFTGenerator(nn.Module):
         lrelu_slope: float = 0.1,
         audio_limit: float = 0.99,
         f0_predictor: Optional[nn.Module] = None,
+        use_interpolation: bool = False,
     ):
         """
         Args:
@@ -465,6 +597,7 @@ class HiFTGenerator(nn.Module):
             lrelu_slope: LeakyReLU negative slope
             audio_limit: Audio clipping limit
             f0_predictor: Optional F0 prediction module
+            use_interpolation: Use interpolation-based phase computation in NSF
         """
         super().__init__()
 
@@ -488,6 +621,7 @@ class HiFTGenerator(nn.Module):
             sine_amp=nsf_alpha,
             add_noise_std=nsf_sigma,
             voiced_threshod=nsf_voiced_threshold,
+            use_interpolation=use_interpolation,
         )
 
         # F0 upsampler
