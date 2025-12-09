@@ -21,7 +21,9 @@ def is_valid_module_name(name: str) -> bool:
     return name[0].isalpha() or name[0] == "_"
 
 
-def get_model_category(model_type: str, model_name: List[str]) -> Optional[str]:
+def get_model_category(
+    model_type: Optional[str], model_name: List[str]
+) -> Optional[str]:
     """Determine whether a model belongs to the TTS or STT category."""
 
     candidates = [model_type] + (model_name or [])
@@ -42,7 +44,7 @@ def get_model_category(model_type: str, model_name: List[str]) -> Optional[str]:
     return None
 
 
-def get_model_name_parts(model_path: Union[str, Path]) -> str:
+def get_model_name_parts(model_path: Union[str, Path]) -> List[str]:
     model_name = None
     if isinstance(model_path, str):
         model_name = model_path.lower().split("/")[-1].split("-")
