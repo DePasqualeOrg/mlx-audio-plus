@@ -768,15 +768,16 @@ class HiFTGenerator(nn.Module):
             si = self.source_resblocks[i](si)
             x = x + si
 
-            # Apply residual blocks
-            xs = None
-            for j in range(self.num_kernels):
-                idx = i * self.num_kernels + j
-                if xs is None:
-                    xs = self.resblocks[idx](x)
-                else:
-                    xs = xs + self.resblocks[idx](x)
-            x = xs / self.num_kernels
+            # Apply residual blocks and average their outputs
+            # Using mx.stack allows MLX's lazy evaluation to optimize the computation graph
+            start_idx = i * self.num_kernels
+            x = mx.mean(
+                mx.stack(
+                    [self.resblocks[start_idx + j](x) for j in range(self.num_kernels)],
+                    axis=0,
+                ),
+                axis=0,
+            )
 
         x = nn.leaky_relu(x, negative_slope=self.lrelu_slope)
         # conv_post: (B, C, T) -> transpose -> conv -> transpose back

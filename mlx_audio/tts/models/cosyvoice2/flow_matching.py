@@ -119,23 +119,31 @@ class CosyVoice2ConditionalCFM(BASECFM):
         t = mx.expand_dims(t_span[0], 0)
         dt = t_span[1] - t_span[0]
 
-        sol = []
-
-        # Prepare batch for CFG (defaults for when spks/cond are None)
+        # Pre-allocate CFG inputs outside the loop to avoid redundant allocations
         T_len = x.shape[2]
-        spks_in = mx.zeros((2, self.spk_emb_dim))
-        cond_in = mx.zeros((2, self.n_feats, T_len))
+        B = x.shape[0]
+
+        # Pre-compute static inputs for CFG (these don't change during iteration)
+        mask_in = mx.concatenate([mask, mask], axis=0)
+        zeros_mu = mx.zeros_like(mu)
+
+        # Pre-compute spks_in (doesn't change during iteration)
+        if spks is not None:
+            spks_in = mx.concatenate([spks, mx.zeros_like(spks)], axis=0)
+        else:
+            spks_in = mx.zeros((2, self.spk_emb_dim))
+
+        # Pre-compute cond_in (doesn't change during iteration)
+        if cond is not None:
+            cond_in = mx.concatenate([cond, mx.zeros_like(cond)], axis=0)
+        else:
+            cond_in = mx.zeros((2, self.n_feats, T_len))
 
         for step in range(1, len(t_span)):
-            # Prepare inputs for CFG
+            # Prepare inputs for CFG - only x and t change each iteration
             x_in = mx.concatenate([x, x], axis=0)
-            mask_in = mx.concatenate([mask, mask], axis=0)
-            mu_in = mx.concatenate([mu, mx.zeros_like(mu)], axis=0)
+            mu_in = mx.concatenate([mu, zeros_mu], axis=0)
             t_in = mx.concatenate([t, t], axis=0)
-            if spks is not None:
-                spks_in = mx.concatenate([spks, mx.zeros_like(spks)], axis=0)
-            if cond is not None:
-                cond_in = mx.concatenate([cond, mx.zeros_like(cond)], axis=0)
 
             # Forward estimator with streaming parameter
             dphi_dt = self.estimator(
@@ -143,17 +151,16 @@ class CosyVoice2ConditionalCFM(BASECFM):
             )
 
             # Split and apply CFG
-            dphi_dt_cond = dphi_dt[: x.shape[0]]
-            dphi_dt_uncond = dphi_dt[x.shape[0] :]
+            dphi_dt_cond = dphi_dt[:B]
+            dphi_dt_uncond = dphi_dt[B:]
             dphi_dt = (
                 1.0 + self.inference_cfg_rate
             ) * dphi_dt_cond - self.inference_cfg_rate * dphi_dt_uncond
 
             x = x + dt * dphi_dt
             t = t + dt
-            sol.append(x)
 
             if step < len(t_span) - 1:
                 dt = t_span[step + 1] - t
 
-        return sol[-1]
+        return x

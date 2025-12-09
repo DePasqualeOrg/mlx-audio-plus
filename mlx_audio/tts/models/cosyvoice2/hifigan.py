@@ -10,15 +10,14 @@ from typing import Dict, List
 
 import mlx.core as mx
 import mlx.nn as nn
-import numpy as np
 
 # Import shared components from chatterbox
 from ..chatterbox.s3gen.hifigan import (
-    Snake,
     ResBlock,
+    Snake,
     hann_window_periodic,
-    stft,
     istft,
+    stft,
 )
 
 
@@ -131,7 +130,7 @@ class SineGen2(nn.Module):
         rad_downsampled = linear_interpolate_1d(rad_values, 1.0 / self.upsample_scale)
 
         # Cumulative sum for phase
-        phase = mx.cumsum(rad_downsampled, axis=1) * 2 * np.pi
+        phase = mx.cumsum(rad_downsampled, axis=1) * 2 * math.pi
 
         # Upsample phase back
         phase = linear_interpolate_1d(phase * self.upsample_scale, self.upsample_scale)
@@ -508,15 +507,16 @@ class CosyHiFTGenerator(nn.Module):
             si = self.source_resblocks[i](si)
             x = x + si
 
-            # Apply residual blocks
-            xs = None
-            for j in range(self.num_kernels):
-                idx = i * self.num_kernels + j
-                if xs is None:
-                    xs = self.resblocks[idx](x)
-                else:
-                    xs = xs + self.resblocks[idx](x)
-            x = xs / self.num_kernels
+            # Apply residual blocks and average their outputs
+            # Using mx.stack allows MLX's lazy evaluation to optimize the computation graph
+            start_idx = i * self.num_kernels
+            x = mx.mean(
+                mx.stack(
+                    [self.resblocks[start_idx + j](x) for j in range(self.num_kernels)],
+                    axis=0,
+                ),
+                axis=0,
+            )
 
         # Note: PyTorch CosyVoice2 uses default negative_slope=0.01 here (not 0.1)
         x = nn.leaky_relu(x, negative_slope=0.01)

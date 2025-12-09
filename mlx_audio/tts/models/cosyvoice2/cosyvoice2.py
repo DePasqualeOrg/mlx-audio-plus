@@ -682,13 +682,11 @@ def load_cosyvoice2(
             "Please run the conversion script."
         )
 
-    import safetensors.numpy
-
-    raw_weights = safetensors.numpy.load_file(str(consolidated_path))
-    all_weights = {k: mx.array(v) for k, v in raw_weights.items()}
+    all_weights = mx.load(str(consolidated_path))
 
     # Load Qwen2 model
-    from mlx_lm.models.qwen2 import Model as Qwen2Model, ModelArgs
+    from mlx_lm.models.qwen2 import Model as Qwen2Model
+    from mlx_lm.models.qwen2 import ModelArgs
 
     # Qwen2-0.5B-Instruct config
     qwen2_args = ModelArgs(
@@ -754,12 +752,12 @@ def load_cosyvoice2(
         llm.update(tree_unflatten(list(llm_weights.items())))
 
     # Import flow components from chatterbox
-    from ..chatterbox.s3gen.flow import CausalMaskedDiffWithXvec
     from ..chatterbox.s3gen.decoder import ConditionalDecoder
+    from ..chatterbox.s3gen.flow import CausalMaskedDiffWithXvec
     from ..chatterbox.s3gen.transformer import UpsampleConformerEncoder
 
     # Use CosyVoice2-specific flow matching (with PyTorch noise compatibility)
-    from .flow_matching import CosyVoice2ConditionalCFM, CFM_PARAMS
+    from .flow_matching import CFM_PARAMS, CosyVoice2ConditionalCFM
 
     # Create encoder
     flow_encoder = UpsampleConformerEncoder(
@@ -1005,12 +1003,10 @@ class Model(nn.Module):
 
             # First try to load from consolidated model.safetensors
             if consolidated_path.exists():
-                import safetensors.numpy
-
-                raw_weights = safetensors.numpy.load_file(str(consolidated_path))
+                raw_weights = mx.load(str(consolidated_path))
                 # Extract campplus.* weights and strip prefix
                 campplus_weights = {
-                    k[9:]: mx.array(v)
+                    k[9:]: v
                     for k, v in raw_weights.items()
                     if k.startswith("campplus.")
                 }
@@ -1088,12 +1084,13 @@ class Model(nn.Module):
             GenerationResult with generated audio
         """
         import time
+
         import numpy as np
         from scipy.signal import resample
 
         from ..base import GenerationResult
-        from ..chatterbox.s3tokenizer import log_mel_spectrogram
         from ..chatterbox.s3gen.mel import mel_spectrogram as cosyvoice2_mel_spectrogram
+        from ..chatterbox.s3tokenizer import log_mel_spectrogram
 
         start_time = time.time()
 
@@ -1308,12 +1305,13 @@ class Model(nn.Module):
         except Exception as e:
             raise RuntimeError(f"Audio generation failed: {e}")
 
-        # Convert to numpy for output
-        audio_np = np.array(audio.squeeze())
+        # Squeeze audio to 1D
+        audio_out = audio.squeeze()
+        num_samples = audio_out.shape[0]
 
         end_time = time.time()
         processing_time = end_time - start_time
-        audio_duration_secs = len(audio_np) / self._sample_rate
+        audio_duration_secs = num_samples / self._sample_rate
 
         # Format duration string
         mins = int(audio_duration_secs // 60)
@@ -1322,15 +1320,15 @@ class Model(nn.Module):
 
         # Create result
         result = GenerationResult(
-            audio=mx.array(audio_np),
-            samples=len(audio_np),
+            audio=audio_out,
+            samples=num_samples,
             sample_rate=self._sample_rate,
             segment_idx=0,
             token_count=len(text_tokens),
             audio_samples={
-                "samples": len(audio_np),
+                "samples": num_samples,
                 "samples-per-sec": (
-                    len(audio_np) / processing_time if processing_time > 0 else 0
+                    num_samples / processing_time if processing_time > 0 else 0
                 ),
             },
             audio_duration=duration_str,
