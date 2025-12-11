@@ -947,7 +947,7 @@ class Model(nn.Module):
             if not tokenizer_path.exists():
                 tokenizer_path = model_path
 
-            if (tokenizer_path / "vocab.json").exists():
+            if (tokenizer_path / "tokenizer.json").exists():
                 from transformers import AutoTokenizer
 
                 self._tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_path))
@@ -977,12 +977,10 @@ class Model(nn.Module):
                 }
                 self._tokenizer.add_special_tokens(special_tokens)
             else:
-                # Try loading from single file
-                tokenizer_json = model_path / "tokenizer.json"
-                if tokenizer_json.exists():
-                    from tokenizers import Tokenizer
-
-                    self._tokenizer = Tokenizer.from_file(str(tokenizer_json))
+                raise RuntimeError(
+                    f"No tokenizer found in {tokenizer_path}. "
+                    "Expected tokenizer.json or vocab.json"
+                )
 
         if self._s3_tokenizer is None:
             # Load S3 speech tokenizer with pretrained weights

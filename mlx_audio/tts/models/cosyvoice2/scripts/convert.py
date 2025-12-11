@@ -431,7 +431,8 @@ def quantize_qwen2_weights(
         Dict of quantized weights (mix of numpy and MLX arrays)
     """
     import mlx.nn as nn
-    from mlx_lm.models.qwen2 import Model as Qwen2Model, ModelArgs
+    from mlx_lm.models.qwen2 import Model as Qwen2Model
+    from mlx_lm.models.qwen2 import ModelArgs
 
     print(f"   Quantizing Qwen2 to {bits}-bit (group_size={group_size})...")
 
@@ -627,16 +628,43 @@ def convert_from_source(
         cache_path = Path(cache_dir)
         print(f"   Downloaded to: {cache_path}")
 
-    # Copy tokenizer config files to root directory
-    # These are Qwen2 tokenizer files needed by transformers.AutoTokenizer
+    # Generate tokenizer files (tokenizer.json + tokenizer_config.json)
+    # tokenizer.json is the "fast tokenizer" format that contains vocab + merges + config
+    # Both Python transformers and swift-transformers can use this format
     tokenizer_src = cache_path / "CosyVoice-BlankEN"
     if tokenizer_src.exists():
-        # Only copy config files, not model.safetensors (weights are in our model.safetensors)
-        for config_file in ["merges.txt", "tokenizer_config.json", "vocab.json"]:
-            src_file = tokenizer_src / config_file
-            if src_file.exists():
-                shutil.copy(src_file, output_dir / config_file)
-        print(f"   Copied tokenizer config files to {output_dir}")
+        try:
+            from transformers import AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_src))
+            # save_pretrained with legacy_format=False only generates:
+            # - tokenizer.json (fast tokenizer with vocab + merges)
+            # - tokenizer_config.json (tokenizer settings)
+            # - special_tokens_map.json (not needed, will be deleted)
+            tokenizer.save_pretrained(str(output_dir), legacy_format=False)
+
+            # Remove files that are not needed for TTS inference
+            # - special_tokens_map.json: redundant (in tokenizer.json and tokenizer_config.json)
+            # - chat_template.jinja: only needed for chat models, not TTS
+            for redundant_file in ["special_tokens_map.json", "chat_template.jinja"]:
+                file_path = output_dir / redundant_file
+                if file_path.exists():
+                    file_path.unlink()
+
+            print(
+                f"   Generated tokenizer files (tokenizer.json + tokenizer_config.json)"
+            )
+        except Exception as e:
+            print(f"   Warning: Could not generate tokenizer files: {e}")
+            # Fallback: copy individual files for Python transformers compatibility
+            for config_file in ["merges.txt", "tokenizer_config.json", "vocab.json"]:
+                src_file = tokenizer_src / config_file
+                if src_file.exists():
+                    shutil.copy(src_file, output_dir / config_file)
+            print(
+                f"   Fallback: Copied legacy tokenizer files (vocab.json, merges.txt)"
+            )
+            print(f"   Note: swift-transformers requires tokenizer.json")
 
     # Helper to convert weights to target dtype
     def apply_dtype(weights: dict) -> dict:
