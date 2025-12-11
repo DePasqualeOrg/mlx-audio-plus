@@ -1,5 +1,4 @@
 # CosyVoice2-specific flow matching module
-# Uses pre-generated PyTorch noise for compatibility
 
 import math
 
@@ -25,7 +24,6 @@ class CosyVoice2ConditionalCFM(BASECFM):
         n_spks: int = 1,
         spk_emb_dim: int = 80,
         estimator: nn.Module = None,
-        rand_noise: mx.array = None,
     ):
         super().__init__(
             n_feats=in_channels,
@@ -38,15 +36,6 @@ class CosyVoice2ConditionalCFM(BASECFM):
         self.inference_cfg_rate = cfm_params.inference_cfg_rate
         self.estimator = estimator
 
-        # Use pre-generated PyTorch noise for compatibility
-        # MLX and PyTorch generate different random numbers with the same seed
-        if rand_noise is not None:
-            self.rand_noise = rand_noise
-        else:
-            # Fallback - generate noise (won't match PyTorch exactly)
-            mx.random.seed(0)
-            self.rand_noise = mx.random.normal((1, self.MEL_CHANNELS, 50 * 300))
-
     def __call__(
         self,
         mu: mx.array,
@@ -58,7 +47,7 @@ class CosyVoice2ConditionalCFM(BASECFM):
         streaming: bool = False,
     ) -> tuple:
         """
-        Forward diffusion with fixed noise for causal generation.
+        Forward diffusion with dynamically generated noise.
 
         Args:
             mu: Encoder output (B, C, T)
@@ -72,8 +61,10 @@ class CosyVoice2ConditionalCFM(BASECFM):
         Returns:
             Tuple of (generated_mel, None)
         """
+        B = mu.shape[0]
         T = mu.shape[2]
-        z = self.rand_noise[:, :, :T] * temperature
+        # Generate noise dynamically with the correct shape
+        z = mx.random.normal((B, self.MEL_CHANNELS, T)) * temperature
 
         # Time span with cosine schedule
         t_span = mx.linspace(0, 1, n_timesteps + 1)
