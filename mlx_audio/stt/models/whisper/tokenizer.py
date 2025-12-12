@@ -1,13 +1,16 @@
 # Copyright © 2023 Apple Inc.
 
 import base64
-import os
 import string
 from dataclasses import dataclass, field
 from functools import cached_property, lru_cache
 from typing import Dict, List, Optional, Tuple
 
 import tiktoken
+from huggingface_hub import hf_hub_download
+
+# Repository containing the tiktoken vocabulary files
+TOKENIZER_REPO = "mlx-community/whisper-tokenizer"
 
 LANGUAGES = {
     "en": "english",
@@ -331,7 +334,9 @@ class Tokenizer:
 
 @lru_cache(maxsize=None)
 def get_encoding(name: str = "gpt2", num_languages: int = 99):
-    vocab_path = os.path.join(os.path.dirname(__file__), "assets", f"{name}.tiktoken")
+    filename = f"{name}.tiktoken"
+    vocab_path = hf_hub_download(repo_id=TOKENIZER_REPO, filename=filename)
+
     with open(vocab_path) as fid:
         ranks = {
             base64.b64decode(token): int(rank)
@@ -358,7 +363,7 @@ def get_encoding(name: str = "gpt2", num_languages: int = 99):
         n_vocab += 1
 
     return tiktoken.Encoding(
-        name=os.path.basename(vocab_path),
+        name=filename,
         explicit_n_vocab=n_vocab,
         pat_str=r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""",
         mergeable_ranks=ranks,
