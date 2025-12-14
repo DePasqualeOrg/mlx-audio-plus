@@ -424,7 +424,7 @@ class Model(nn.Module):
 
         Automatically handles quantized weights if config.json contains quantization info.
 
-        Use scripts/convert_chatterbox.py to convert from original PyTorch weights.
+        Use scripts/convert.py to convert from original PyTorch weights.
 
         Args:
             ckpt_dir: Path to checkpoint directory containing model.safetensors
@@ -464,7 +464,7 @@ class Model(nn.Module):
         if not combined_path.exists():
             raise FileNotFoundError(
                 f"model.safetensors not found in {ckpt_dir}. "
-                "Use scripts/convert_chatterbox.py to convert from PyTorch weights."
+                "Use scripts/convert.py to convert from PyTorch weights."
             )
 
         # Load config to check for quantization

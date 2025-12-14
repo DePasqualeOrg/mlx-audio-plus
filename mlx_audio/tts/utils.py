@@ -354,10 +354,10 @@ def upload_to_hub(path: str, upload_repo: str, hf_path: str):
 
 
 def _detect_model_type_from_path(hf_path: str) -> Optional[str]:
-    """Detect model type from HuggingFace path or local path.
+    """Detect model type from Hugging Face path or local path.
 
     Args:
-        hf_path: HuggingFace repo ID or local path
+        hf_path: Hugging Face repo ID or local path
 
     Returns:
         Model type string if detected, None otherwise

@@ -11,23 +11,23 @@ shared between multiple TTS models (Chatterbox, CosyVoice2, etc.).
 
 Usage:
     # Convert Chatterbox (without S3Tokenizer) to fp16
-    python scripts/convert_chatterbox.py
+    python scripts/convert.py
 
     # Convert to 4-bit quantized
-    python scripts/convert_chatterbox.py --quantize
+    python scripts/convert.py --quantize
 
     # Convert S3Tokenizer only (shared component)
-    python scripts/convert_chatterbox.py --s3-tokenizer-only
+    python scripts/convert.py --s3-tokenizer-only
 
     # Upload Chatterbox to Hugging Face
-    python scripts/convert_chatterbox.py --quantize --upload-repo
+    python scripts/convert.py --quantize --upload-repo
 
     # Upload S3Tokenizer to Hugging Face
-    python scripts/convert_chatterbox.py --s3-tokenizer-only --upload-repo
+    python scripts/convert.py --s3-tokenizer-only --upload-repo
 
     # Custom repos
-    python scripts/convert_chatterbox.py --upload-repo my-org/my-chatterbox
-    python scripts/convert_chatterbox.py --s3-tokenizer-only --upload-repo my-org/my-s3tokenizer
+    python scripts/convert.py --upload-repo my-org/my-chatterbox
+    python scripts/convert.py --s3-tokenizer-only --upload-repo my-org/my-s3tokenizer
 
 Requirements (for conversion only):
     pip install torch safetensors huggingface_hub onnx s3tokenizer
@@ -570,12 +570,12 @@ def convert_from_source(
     a Chatterbox model, or can be called directly.
 
     Args:
-        model_id: HuggingFace model ID (default: ResembleAI/chatterbox)
+        model_id: Hugging Face model ID (default: ResembleAI/chatterbox)
         output_dir: Output directory for MLX weights
         quantize: Whether to quantize weights
         q_bits: Quantization bits (default: 4)
         q_group_size: Quantization group size (default: 64)
-        upload_repo: HuggingFace repo to upload to
+        upload_repo: Hugging Face repo to upload to
         dry_run: Generate files but skip upload
     """
     if output_dir is None:
@@ -601,7 +601,7 @@ def main():
         description="Convert Chatterbox weights to MLX format"
     )
     parser.add_argument(
-        "--mlx-path",
+        "--output-dir",
         type=Path,
         default=None,
         help="Output directory for MLX weights (default: ./Chatterbox-TTS-{fp16|Nbit} or ./S3TokenizerV2)",
@@ -612,10 +612,13 @@ def main():
     parser.add_argument(
         "--upload-repo",
         type=str,
-        nargs="?",
-        const="",
         default=None,
-        help="Upload to Hugging Face. Optionally specify repo (default: mlx-community/Chatterbox-TTS-{fp16|Nbit} or mlx-community/S3TokenizerV2)",
+        help="Hugging Face repo to upload to (e.g., mlx-community/Chatterbox-TTS-fp16)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Generate all files including README but skip upload",
     )
     parser.add_argument(
         "--quantize",
@@ -643,20 +646,16 @@ def main():
     )
     args = parser.parse_args()
 
-    # Determine if we should upload (--upload-repo was provided, even without value)
-    should_upload = args.upload_repo is not None
+    # Determine if we should upload (--upload-repo provided and not --dry-run)
+    should_upload = args.upload_repo is not None and not args.dry_run
 
     if args.s3_tokenizer_only:
         # S3Tokenizer conversion mode
-        mlx_path = args.mlx_path or Path("./S3TokenizerV2")
-        upload_repo = (
-            (args.upload_repo or "mlx-community/S3TokenizerV2")
-            if args.upload_repo is not None
-            else "mlx-community/S3TokenizerV2"
-        )
+        output_dir = args.output_dir or Path("./S3TokenizerV2")
+        upload_repo = args.upload_repo or f"mlx-community/{output_dir.name}"
 
         convert_s3_tokenizer(
-            output_dir=mlx_path,
+            output_dir=output_dir,
             cache_dir=args.cache_dir,
             upload_repo=upload_repo,
             dry_run=not should_upload,
@@ -664,15 +663,11 @@ def main():
     else:
         # Chatterbox conversion mode
         precision_suffix = f"{args.q_bits}bit" if args.quantize else "fp16"
-        mlx_path = args.mlx_path or Path(f"./Chatterbox-TTS-{precision_suffix}")
-        upload_repo = (
-            (args.upload_repo or f"mlx-community/Chatterbox-TTS-{precision_suffix}")
-            if args.upload_repo is not None
-            else f"mlx-community/Chatterbox-TTS-{precision_suffix}"
-        )
+        output_dir = args.output_dir or Path(f"./Chatterbox-TTS-{precision_suffix}")
+        upload_repo = args.upload_repo or f"mlx-community/{output_dir.name}"
 
         convert_all(
-            output_dir=mlx_path,
+            output_dir=output_dir,
             cache_dir=args.cache_dir,
             upload_repo=upload_repo,
             quantize=args.quantize,

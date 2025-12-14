@@ -274,7 +274,7 @@ def convert(name_or_path: str, dtype: mx.Dtype = mx.float16):
 def generate_readme(
     output_dir: Path, torch_name_or_path: str, upload_repo: str
 ) -> None:
-    """Generate README.md model card for HuggingFace."""
+    """Generate README.md model card for Hugging Face."""
     from mlx_audio.version import __version__
 
     # Determine base model URL
@@ -287,6 +287,7 @@ def generate_readme(
 
     card_text = f"""---
 library_name: mlx-audio-plus
+license: apache-2.0
 base_model:
 - {base_model}
 tags:
@@ -372,22 +373,34 @@ def quantize(weights, config, args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert Whisper weights to MLX.")
     parser.add_argument(
-        "--torch-name-or-path",
+        "--model-id",
         type=str,
-        default="tiny",
-        help="The name or path to the PyTorch model.",
+        default="openai/whisper-tiny",
+        help="Hugging Face model ID or path to PyTorch model (e.g., openai/whisper-large-v3)",
     )
     parser.add_argument(
-        "--mlx-path",
+        "--output-dir",
         type=str,
-        default="mlx_models",
-        help="The path to save the MLX model.",
+        default=None,
+        help="Output directory for MLX weights (default: ./{model-name})",
+    )
+    parser.add_argument(
+        "--upload-repo",
+        type=str,
+        default=None,
+        help="Hugging Face repo to upload to (e.g., mlx-community/whisper-large-v3)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Generate all files including README but skip upload",
     )
     parser.add_argument(
         "--dtype",
         type=str,
         default="float16",
-        help="The dtype to save the MLX model.",
+        choices=["float16", "bfloat16", "float32"],
+        help="Data type for weights (default: float16)",
     )
     parser.add_argument(
         "-q",
@@ -396,22 +409,17 @@ if __name__ == "__main__":
         action="store_true",
     )
     parser.add_argument(
-        "--q-group-size",
-        help="Group size for quantization.",
-        type=int,
-        default=64,
-    )
-    parser.add_argument(
         "--q-bits",
-        help="Bits per weight for quantization.",
         type=int,
         default=4,
+        choices=[2, 3, 4, 5, 6, 8],
+        help="Quantization bits (default: 4)",
     )
     parser.add_argument(
-        "--upload-name",
-        help="The name of model to upload to Hugging Face MLX Community",
-        type=str,
-        default=None,
+        "--q-group-size",
+        type=int,
+        default=64,
+        help="Quantization group size (default: 64)",
     )
 
     args = parser.parse_args()
@@ -421,8 +429,16 @@ if __name__ == "__main__":
     ), f"dtype {args.dtype} not found in {_VALID_DTYPES}"
     dtype = getattr(mx, args.dtype)
 
+    # Derive output directory from model_id if not provided
+    if args.output_dir is None:
+        # Extract model name from model_id (e.g., "openai/whisper-large-v3" -> "whisper-large-v3")
+        model_name = args.model_id.split("/")[-1]
+        output_dir = Path(model_name)
+    else:
+        output_dir = Path(args.output_dir)
+
     print("[INFO] Loading")
-    model = convert(args.torch_name_or_path, dtype)
+    model = convert(args.model_id, dtype)
     config = asdict(model.dims)
     weights = dict(tree_flatten(model.parameters()))
 
@@ -430,25 +446,36 @@ if __name__ == "__main__":
         print("[INFO] Quantizing")
         weights, config = quantize(weights, config, args)
 
-    mlx_path = Path(args.mlx_path)
-    mlx_path.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Save weights
     print("[INFO] Saving")
-    mx.save_safetensors(str(mlx_path / "model.safetensors"), weights)
+    mx.save_safetensors(str(output_dir / "model.safetensors"), weights)
 
     # Save config.json with model_type
-    with open(str(mlx_path / "config.json"), "w") as f:
+    with open(str(output_dir / "config.json"), "w") as f:
         config["model_type"] = "whisper"
         json.dump(config, f, indent=4)
 
     # Download and save the appropriate tiktoken vocabulary
     is_multilingual = config["n_vocab"] >= 51865
     tiktoken_name = "multilingual" if is_multilingual else "gpt2"
-    _download_tiktoken(tiktoken_name, mlx_path)
+    _download_tiktoken(tiktoken_name, output_dir)
 
-    # Generate README and optionally upload
-    if args.upload_name is not None:
-        upload_repo = f"mlx-community/{args.upload_name}"
-        generate_readme(mlx_path, args.torch_name_or_path, upload_repo)
-        upload_to_hub(mlx_path, args.upload_name, args.torch_name_or_path)
+    # Generate README (use upload_repo if provided, otherwise derive from output_dir)
+    if args.upload_repo is not None:
+        upload_repo = args.upload_repo
+    else:
+        # Derive repo name from output path (e.g., /tmp/whisper-tiny -> mlx-community/whisper-tiny)
+        upload_repo = f"mlx-community/{output_dir.name}"
+    generate_readme(output_dir, args.model_id, upload_repo)
+
+    # Upload if requested (and not dry-run)
+    if args.upload_repo is not None and not args.dry_run:
+        # Extract repo name from full repo path for upload
+        repo_name = (
+            args.upload_repo.split("/")[-1]
+            if "/" in args.upload_repo
+            else args.upload_repo
+        )
+        upload_to_hub(output_dir, repo_name, args.model_id)

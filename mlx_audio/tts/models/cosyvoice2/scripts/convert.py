@@ -6,7 +6,7 @@ Usage:
     # Convert to local directory
     python -m mlx_audio.tts.models.cosyvoice2.scripts.convert --output-dir ~/.cache/mlx_audio/cosyvoice2
 
-    # Convert and upload to HuggingFace
+    # Convert and upload to Hugging Face
     python -m mlx_audio.tts.models.cosyvoice2.scripts.convert --upload-repo mlx-community/CosyVoice2-0.5B
 
     # Dry run (generate files but don't upload)
@@ -323,7 +323,7 @@ def convert_hift_weights(pt_weights: dict) -> dict:
 
 
 def generate_readme(output_dir: Path, model_id: str, upload_repo: str) -> None:
-    """Generate README.md model card for HuggingFace."""
+    """Generate README.md model card for Hugging Face."""
     from mlx_audio.version import __version__
 
     card_text = f"""---
@@ -397,7 +397,7 @@ generate_audio(
 
 
 def upload_to_hub(output_dir: Path, upload_repo: str) -> None:
-    """Upload converted model to HuggingFace Hub."""
+    """Upload converted model to Hugging Face Hub."""
     from huggingface_hub import HfApi
 
     print(f"\nUploading to {upload_repo}...")
@@ -585,13 +585,13 @@ def convert_from_source(
     a CosyVoice2 model, or can be called directly.
 
     Args:
-        model_id: HuggingFace model ID (default: FunAudioLLM/CosyVoice2-0.5B)
+        model_id: Hugging Face model ID (default: FunAudioLLM/CosyVoice2-0.5B)
         output_dir: Output directory for MLX weights
         quantize: Whether to quantize weights
         q_bits: Quantization bits (4 or 8)
         q_group_size: Quantization group size (default: 64)
         dtype: Data type for weights (float16, bfloat16, float32)
-        upload_repo: HuggingFace repo to upload to
+        upload_repo: Hugging Face repo to upload to
         dry_run: Generate files but skip upload
     """
     import shutil
@@ -620,7 +620,7 @@ def convert_from_source(
         cache_path = model_path
         print(f"   Using local path: {cache_path}")
     else:
-        # HuggingFace repo ID
+        # Hugging Face repo ID
         cache_dir = snapshot_download(
             model_id,
             allow_patterns=["*.pt", "CosyVoice-BlankEN/*"],
@@ -806,7 +806,7 @@ def convert_from_source(
             f'  python -m mlx_audio.tts.generate --model {output_dir} --text "Hello" --ref_audio ref.wav'
         )
 
-    # Upload to HuggingFace if requested
+    # Upload to Hugging Face if requested
     if upload_repo and not dry_run:
         upload_to_hub(output_dir, upload_repo)
     elif upload_repo:
@@ -819,7 +819,7 @@ def main():
     parser.add_argument(
         "--model-id",
         default="FunAudioLLM/CosyVoice2-0.5B",
-        help="HuggingFace model ID",
+        help="Hugging Face model ID",
     )
     parser.add_argument(
         "--output-dir",
@@ -831,7 +831,7 @@ def main():
         "--upload-repo",
         type=str,
         default=None,
-        help="HuggingFace repo to upload to (e.g., mlx-community/CosyVoice2-0.5B)",
+        help="Hugging Face repo to upload to (e.g., mlx-community/CosyVoice2-0.5B)",
     )
     parser.add_argument(
         "--dry-run",
