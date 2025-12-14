@@ -271,36 +271,71 @@ def convert(name_or_path: str, dtype: mx.Dtype = mx.float16):
     return model
 
 
-def upload_to_hub(path: str, name: str, torch_name_or_path: str):
-    import os
+def generate_readme(
+    output_dir: Path, torch_name_or_path: str, upload_repo: str
+) -> None:
+    """Generate README.md model card for HuggingFace."""
+    from mlx_audio.version import __version__
 
-    from huggingface_hub import HfApi, ModelCard, logging
+    # Determine base model URL
+    if torch_name_or_path in _MODELS:
+        base_model = f"openai/whisper-{torch_name_or_path}"
+        base_model_url = f"https://github.com/openai/whisper"
+    else:
+        base_model = torch_name_or_path
+        base_model_url = f"https://huggingface.co/{torch_name_or_path}"
 
-    repo_id = f"mlx-community/{name}"
-    text = f"""
+    card_text = f"""---
+library_name: mlx-audio-plus
+base_model:
+- {base_model}
+tags:
+- mlx
+- whisper
+- speech-recognition
+- speech-to-text
+- stt
+pipeline_tag: automatic-speech-recognition
 ---
-library_name: mlx
----
 
-# {name}
-This model was converted to MLX format from [`{torch_name_or_path}`]().
+# {upload_repo}
 
-## Use with mlx
+This model was converted to MLX format from [{base_model}]({base_model_url}) using [mlx-audio-plus](https://github.com/DePasqualeOrg/mlx-audio-plus) version **{__version__}**.
+
+## Use with mlx-audio-plus
+
 ```bash
-pip install mlx-whisper
+pip install -U mlx-audio-plus
 ```
+
+### Command line
+
+```bash
+mlx_audio.stt --model {upload_repo} --audio audio.mp3
+```
+
+### Python
 
 ```python
-import mlx_whisper
+from mlx_audio.stt import transcribe
 
-result = mlx_whisper.transcribe(
-    "FILE_NAME",
-    path_or_hf_repo={repo_id},
+result = transcribe(
+    audio="audio.mp3",
+    model="{upload_repo}",
 )
+print(result["text"])
 ```
 """
-    card = ModelCard(text)
-    card.save(os.path.join(path, "README.md"))
+    card_path = output_dir / "README.md"
+    with open(card_path, "w") as f:
+        f.write(card_text)
+    print(f"[INFO] Created {card_path}")
+
+
+def upload_to_hub(path: str, name: str, torch_name_or_path: str):
+    from huggingface_hub import HfApi, logging
+
+    repo_id = f"mlx-community/{name}"
 
     logging.set_verbosity_info()
 
@@ -412,5 +447,8 @@ if __name__ == "__main__":
     tiktoken_name = "multilingual" if is_multilingual else "gpt2"
     _download_tiktoken(tiktoken_name, mlx_path)
 
+    # Generate README and optionally upload
     if args.upload_name is not None:
+        upload_repo = f"mlx-community/{args.upload_name}"
+        generate_readme(mlx_path, args.torch_name_or_path, upload_repo)
         upload_to_hub(mlx_path, args.upload_name, args.torch_name_or_path)
