@@ -8,7 +8,7 @@ CosyVoice2 is a speech synthesis model from Alibaba that supports multiple infer
 
 ## Models
 
-| Model | Size | HuggingFace |
+| Model | Size | Hugging Face |
 |-------|------|-------------|
 | fp16 | 1.5 GB | [mlx-community/CosyVoice2-0.5B-fp16](https://huggingface.co/mlx-community/CosyVoice2-0.5B-fp16) |
 | 8-bit | 913 MB | [mlx-community/CosyVoice2-0.5B-8bit](https://huggingface.co/mlx-community/CosyVoice2-0.5B-8bit) |
@@ -63,7 +63,7 @@ python -m mlx_audio.tts.models.cosyvoice2.scripts.convert --quantize 8
 # 4-bit quantization
 python -m mlx_audio.tts.models.cosyvoice2.scripts.convert --quantize 4
 
-# Upload to HuggingFace
+# Upload to Hugging Face
 python -m mlx_audio.tts.models.cosyvoice2.scripts.convert --upload-repo username/repo-name
 ```
 
