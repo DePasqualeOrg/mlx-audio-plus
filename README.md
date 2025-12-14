@@ -1,10 +1,16 @@
 # MLX Audio Plus
 
-In addition to the models from [Blaizzy/mlx-audio](https://github.com/Blaizzy/mlx-audio), this package includes the following new models ported to MLX in Python:
+## Motivation
+
+This fork removes a large amount of cruft (incompatibly licensed code and data that should not be included in the repo) from [Blaizzy/mlx-audio](https://github.com/Blaizzy/mlx-audio). In addition to the models from that repo, this one includes improvements as well as the following new models ported to MLX in Python:
 
 - TTS
   - [Chatterbox](https://github.com/resemble-ai/chatterbox)
   - [CosyVoice2](https://huggingface.co/FunAudioLLM/CosyVoice2-0.5B)
+
+Improvements to the upstream repo will continue to be merged here.
+
+This repo also serves as the basis for Swift ports of models in [mlx-swift-audio](https://github.com/DePasqualeOrg/mlx-swift-audio).
 
 ## Installation
 
