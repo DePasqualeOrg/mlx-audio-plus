@@ -7,6 +7,7 @@
 #   - tokenizer.py
 #   - timing.py
 #   - writers.py
+#   - convert.py (to scripts/)
 #
 # These files are pure ML utilities with no mlx-audio-plus customizations.
 # The custom functionality lives in whisper.py and audio.py, which we don't sync.
@@ -25,6 +26,7 @@ set -e  # Exit on error
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 WHISPER_DIR="$PROJECT_ROOT/mlx_audio/stt/models/whisper"
+WHISPER_SCRIPTS_DIR="$WHISPER_DIR/scripts"
 TMP_DIR="${TMP_DIR:-/tmp}"
 UPSTREAM_REPO="https://github.com/ml-explore/mlx-examples.git"
 UPSTREAM_DIR="$TMP_DIR/mlx-examples-sync"
@@ -75,18 +77,28 @@ UPSTREAM_DATE=$(git log -1 --format=%cd --date=short)
 echo "📍 Upstream commit: $UPSTREAM_COMMIT ($UPSTREAM_DATE)"
 echo
 
-# Files to sync
-FILES=(
+# Files to sync from whisper/mlx_whisper/
+MLX_WHISPER_FILES=(
     "decoding.py"
     "tokenizer.py"
     "timing.py"
     "writers.py"
 )
 
+# Files to sync from whisper/ (top-level)
+TOP_LEVEL_FILES=(
+    "convert.py"
+)
+
 # Show what will be synced
 echo "📋 Files to sync:"
-for file in "${FILES[@]}"; do
-    echo "   - $file"
+echo "   From mlx_whisper/:"
+for file in "${MLX_WHISPER_FILES[@]}"; do
+    echo "      - $file"
+done
+echo "   From whisper/:"
+for file in "${TOP_LEVEL_FILES[@]}"; do
+    echo "      - $file -> scripts/$file"
 done
 echo
 
@@ -96,13 +108,31 @@ echo "🔍 Checking for changes..."
 echo
 
 CHANGES_FOUND=false
-for file in "${FILES[@]}"; do
+
+# Check mlx_whisper files
+for file in "${MLX_WHISPER_FILES[@]}"; do
     if ! cmp -s "$UPSTREAM_DIR/whisper/mlx_whisper/$file" "$WHISPER_DIR/$file"; then
         CHANGES_FOUND=true
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo "Changes in $file:"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         diff -u "$WHISPER_DIR/$file" "$UPSTREAM_DIR/whisper/mlx_whisper/$file" || true
+        echo
+    fi
+done
+
+# Check top-level files (convert.py -> scripts/)
+for file in "${TOP_LEVEL_FILES[@]}"; do
+    if [ ! -f "$WHISPER_SCRIPTS_DIR/$file" ] || ! cmp -s "$UPSTREAM_DIR/whisper/$file" "$WHISPER_SCRIPTS_DIR/$file"; then
+        CHANGES_FOUND=true
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "Changes in scripts/$file:"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        if [ -f "$WHISPER_SCRIPTS_DIR/$file" ]; then
+            diff -u "$WHISPER_SCRIPTS_DIR/$file" "$UPSTREAM_DIR/whisper/$file" || true
+        else
+            echo "(new file)"
+        fi
         echo
     fi
 done
@@ -124,9 +154,18 @@ fi
 # Perform the sync
 echo
 echo "🔄 Syncing files..."
-for file in "${FILES[@]}"; do
+
+# Sync mlx_whisper files
+for file in "${MLX_WHISPER_FILES[@]}"; do
     cp "$UPSTREAM_DIR/whisper/mlx_whisper/$file" "$WHISPER_DIR/$file"
     echo "   ✓ $file"
+done
+
+# Sync top-level files to scripts/
+mkdir -p "$WHISPER_SCRIPTS_DIR"
+for file in "${TOP_LEVEL_FILES[@]}"; do
+    cp "$UPSTREAM_DIR/whisper/$file" "$WHISPER_SCRIPTS_DIR/$file"
+    echo "   ✓ scripts/$file"
 done
 echo
 
