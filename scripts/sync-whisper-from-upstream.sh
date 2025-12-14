@@ -4,13 +4,12 @@
 #
 # This script syncs the following files from ml-explore/mlx-examples:
 #   - decoding.py
-#   - tokenizer.py
 #   - timing.py
 #   - writers.py
-#   - convert.py (to scripts/)
 #
-# These files are pure ML utilities with no mlx-audio-plus customizations.
-# The custom functionality lives in whisper.py and audio.py, which we don't sync.
+# Files not synced (have custom mlx-audio-plus changes):
+#   - tokenizer.py (custom tiktoken loading from model dir / GitHub)
+#   - convert.py (custom tiktoken inclusion in converted models)
 #
 # For more details on the sync strategy, see: docs/stt/whisper.md
 #
@@ -26,7 +25,6 @@ set -e  # Exit on error
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 WHISPER_DIR="$PROJECT_ROOT/mlx_audio/stt/models/whisper"
-WHISPER_SCRIPTS_DIR="$WHISPER_DIR/scripts"
 TMP_DIR="${TMP_DIR:-/tmp}"
 UPSTREAM_REPO="https://github.com/ml-explore/mlx-examples.git"
 UPSTREAM_DIR="$TMP_DIR/mlx-examples-sync"
@@ -78,27 +76,20 @@ echo "📍 Upstream commit: $UPSTREAM_COMMIT ($UPSTREAM_DATE)"
 echo
 
 # Files to sync from whisper/mlx_whisper/
+# Note: tokenizer.py is not synced (custom changes for tiktoken loading)
 MLX_WHISPER_FILES=(
     "decoding.py"
-    "tokenizer.py"
     "timing.py"
     "writers.py"
 )
 
-# Files to sync from whisper/ (top-level)
-TOP_LEVEL_FILES=(
-    "convert.py"
-)
+# Note: convert.py is not synced (custom changes for tiktoken inclusion)
+# See: mlx_audio/stt/models/whisper/scripts/convert.py
 
 # Show what will be synced
 echo "📋 Files to sync:"
-echo "   From mlx_whisper/:"
 for file in "${MLX_WHISPER_FILES[@]}"; do
-    echo "      - $file"
-done
-echo "   From whisper/:"
-for file in "${TOP_LEVEL_FILES[@]}"; do
-    echo "      - $file -> scripts/$file"
+    echo "   - $file"
 done
 echo
 
@@ -117,22 +108,6 @@ for file in "${MLX_WHISPER_FILES[@]}"; do
         echo "Changes in $file:"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         diff -u "$WHISPER_DIR/$file" "$UPSTREAM_DIR/whisper/mlx_whisper/$file" || true
-        echo
-    fi
-done
-
-# Check top-level files (convert.py -> scripts/)
-for file in "${TOP_LEVEL_FILES[@]}"; do
-    if [ ! -f "$WHISPER_SCRIPTS_DIR/$file" ] || ! cmp -s "$UPSTREAM_DIR/whisper/$file" "$WHISPER_SCRIPTS_DIR/$file"; then
-        CHANGES_FOUND=true
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo "Changes in scripts/$file:"
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        if [ -f "$WHISPER_SCRIPTS_DIR/$file" ]; then
-            diff -u "$WHISPER_SCRIPTS_DIR/$file" "$UPSTREAM_DIR/whisper/$file" || true
-        else
-            echo "(new file)"
-        fi
         echo
     fi
 done
@@ -159,13 +134,6 @@ echo "🔄 Syncing files..."
 for file in "${MLX_WHISPER_FILES[@]}"; do
     cp "$UPSTREAM_DIR/whisper/mlx_whisper/$file" "$WHISPER_DIR/$file"
     echo "   ✓ $file"
-done
-
-# Sync top-level files to scripts/
-mkdir -p "$WHISPER_SCRIPTS_DIR"
-for file in "${TOP_LEVEL_FILES[@]}"; do
-    cp "$UPSTREAM_DIR/whisper/$file" "$WHISPER_SCRIPTS_DIR/$file"
-    echo "   ✓ scripts/$file"
 done
 echo
 

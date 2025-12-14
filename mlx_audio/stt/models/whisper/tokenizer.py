@@ -3,11 +3,18 @@
 import base64
 import os
 import string
+import urllib.request
 from dataclasses import dataclass, field
 from functools import cached_property, lru_cache
-from typing import Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union
 
 import tiktoken
+
+_TIKTOKEN_URLS = {
+    "gpt2": "https://raw.githubusercontent.com/openai/whisper/main/whisper/assets/gpt2.tiktoken",
+    "multilingual": "https://raw.githubusercontent.com/openai/whisper/main/whisper/assets/multilingual.tiktoken",
+}
 
 LANGUAGES = {
     "en": "english",
@@ -329,9 +336,45 @@ class Tokenizer:
         return words, word_tokens
 
 
-@lru_cache(maxsize=None)
-def get_encoding(name: str = "gpt2", num_languages: int = 99):
-    vocab_path = os.path.join(os.path.dirname(__file__), "assets", f"{name}.tiktoken")
+def _get_tiktoken_path(name: str, model_path: Optional[Union[str, Path]] = None) -> str:
+    """
+    Get path to tiktoken vocabulary file.
+
+    Search order:
+    1. Model directory (if provided)
+    2. Local cache (~/.cache/mlx-audio/whisper/assets/)
+    3. Download from GitHub to cache
+    """
+    if name not in _TIKTOKEN_URLS:
+        raise ValueError(
+            f"Unknown tiktoken vocab: {name}. Must be one of: {list(_TIKTOKEN_URLS.keys())}"
+        )
+
+    # Check model directory first
+    if model_path is not None:
+        model_vocab_path = Path(model_path) / f"{name}.tiktoken"
+        if model_vocab_path.exists():
+            return str(model_vocab_path)
+
+    # Check/create cache directory
+    cache_dir = Path.home() / ".cache" / "mlx-audio" / "whisper" / "assets"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cached_path = cache_dir / f"{name}.tiktoken"
+
+    # Download if not cached
+    if not cached_path.exists():
+        print(f"Downloading {name}.tiktoken vocabulary...")
+        urllib.request.urlretrieve(_TIKTOKEN_URLS[name], cached_path)
+
+    return str(cached_path)
+
+
+def get_encoding(
+    name: str = "gpt2",
+    num_languages: int = 99,
+    model_path: Optional[Union[str, Path]] = None,
+):
+    vocab_path = _get_tiktoken_path(name, model_path)
     with open(vocab_path) as fid:
         ranks = {
             base64.b64decode(token): int(rank)
@@ -366,13 +409,13 @@ def get_encoding(name: str = "gpt2", num_languages: int = 99):
     )
 
 
-@lru_cache(maxsize=None)
 def get_tokenizer(
     multilingual: bool,
     *,
     num_languages: int = 99,
     language: Optional[str] = None,
     task: Optional[str] = None,  # Literal["transcribe", "translate", None]
+    model_path: Optional[Union[str, Path]] = None,
 ) -> Tokenizer:
     if language is not None:
         language = language.lower()
@@ -391,7 +434,9 @@ def get_tokenizer(
         language = None
         task = None
 
-    encoding = get_encoding(name=encoding_name, num_languages=num_languages)
+    encoding = get_encoding(
+        name=encoding_name, num_languages=num_languages, model_path=model_path
+    )
 
     return Tokenizer(
         encoding=encoding, num_languages=num_languages, language=language, task=task
