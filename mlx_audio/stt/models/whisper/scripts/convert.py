@@ -22,6 +22,11 @@ from tqdm import tqdm
 
 _VALID_DTYPES = {"float16", "float32"}
 
+_TIKTOKEN_URLS = {
+    "gpt2": "https://raw.githubusercontent.com/openai/whisper/main/whisper/assets/gpt2.tiktoken",
+    "multilingual": "https://raw.githubusercontent.com/openai/whisper/main/whisper/assets/multilingual.tiktoken",
+}
+
 _MODELS = {
     "tiny.en": "https://openaipublic.azureedge.net/main/whisper/models/d3dd57d32accea0b295c96e26691aa14d8822fac7d9d27d5dc00b4ca2826dd03/tiny.en.pt",
     "tiny": "https://openaipublic.azureedge.net/main/whisper/models/65147644a518d12f04e32d6f3b26facc3f8dd46e5390956a9424a650c0ce22b9/tiny.pt",
@@ -107,6 +112,19 @@ def _download(url: str, root: str) -> str:
 def available_models() -> List[str]:
     """Returns the names of available models"""
     return list(_MODELS.keys())
+
+
+def _download_tiktoken(name: str, dest_path: Path) -> None:
+    """Download tiktoken vocabulary file from GitHub."""
+    if name not in _TIKTOKEN_URLS:
+        raise ValueError(f"Unknown tiktoken vocab: {name}")
+
+    url = _TIKTOKEN_URLS[name]
+    dest_file = dest_path / f"{name}.tiktoken"
+
+    print(f"[INFO] Downloading {name}.tiktoken")
+    with urllib.request.urlopen(url) as source, open(dest_file, "wb") as output:
+        output.write(source.read())
 
 
 def hf_to_pt(weights, config):
@@ -388,6 +406,11 @@ if __name__ == "__main__":
     with open(str(mlx_path / "config.json"), "w") as f:
         config["model_type"] = "whisper"
         json.dump(config, f, indent=4)
+
+    # Download and save the appropriate tiktoken vocabulary
+    is_multilingual = config["n_vocab"] >= 51865
+    tiktoken_name = "multilingual" if is_multilingual else "gpt2"
+    _download_tiktoken(tiktoken_name, mlx_path)
 
     if args.upload_name is not None:
         upload_to_hub(mlx_path, args.upload_name, args.torch_name_or_path)

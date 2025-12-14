@@ -253,6 +253,7 @@ class Model(nn.Module):
         super().__init__()
         self.dims = dims
         self.dtype = dtype
+        self._model_path: Optional[Path] = None  # Set by from_pretrained
         self.encoder = AudioEncoder(
             self.dims.n_mels,
             self.dims.n_audio_ctx,
@@ -351,6 +352,7 @@ class Model(nn.Module):
 
         weights = tree_unflatten(list(weights.items()))
         model.update(weights)
+        model._model_path = model_path
         mx.eval(model.parameters())
         return model
 
@@ -453,6 +455,14 @@ class Model(nn.Module):
             else:
                 make_safe = lambda x: x
 
+        # Pre-load tokenizer to ensure vocab is cached (needed before language detection)
+        # This also handles downloading from GitHub if not found in model directory
+        initial_tokenizer = get_tokenizer(
+            self.is_multilingual,
+            num_languages=self.num_languages,
+            model_path=self._model_path,
+        )
+
         if decode_options.get("language", None) is None:
             if not self.is_multilingual:
                 decode_options["language"] = "en"
@@ -463,7 +473,9 @@ class Model(nn.Module):
                         "Use the `language` decoding option to specify the language"
                     )
                 mel_segment = pad_or_trim(mel, N_FRAMES, axis=-2).astype(self.dtype)
-                _, probs = self.detect_language(mel_segment)
+                _, probs = self.detect_language(
+                    mel_segment, tokenizer=initial_tokenizer
+                )
                 decode_options["language"] = max(probs, key=probs.get)
                 if verbose is not None:
                     print(
@@ -472,11 +484,15 @@ class Model(nn.Module):
 
         language: str = decode_options["language"]
         task: str = decode_options.get("task", "transcribe")
+
+        # Create final tokenizer with language/task settings
+        # Vocab is already cached from initial_tokenizer load above
         tokenizer = get_tokenizer(
             self.is_multilingual,
             num_languages=self.num_languages,
             language=language,
             task=task,
+            model_path=self._model_path,
         )
 
         if isinstance(clip_timestamps, str):
