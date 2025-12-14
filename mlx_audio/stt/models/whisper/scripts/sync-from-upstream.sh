@@ -14,7 +14,7 @@
 # For more details on the sync strategy, see: docs/stt/whisper.md
 #
 # Usage:
-#   ./scripts/sync-whisper-from-upstream.sh [--test]
+#   ./mlx_audio/stt/models/whisper/scripts/sync-from-upstream.sh [--test]
 #
 # Options:
 #   --test    Run tests after syncing
@@ -23,8 +23,8 @@
 set -e  # Exit on error
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-WHISPER_DIR="$PROJECT_ROOT/mlx_audio/stt/models/whisper"
+WHISPER_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT_ROOT="$(cd "$WHISPER_DIR/../../../../.." && pwd)"
 TMP_DIR="${TMP_DIR:-/tmp}"
 UPSTREAM_REPO="https://github.com/ml-explore/mlx-examples.git"
 UPSTREAM_DIR="$TMP_DIR/mlx-examples-sync"
