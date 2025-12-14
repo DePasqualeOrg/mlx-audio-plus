@@ -333,7 +333,9 @@ class Model(nn.Module):
 
         model_args = ModelDimensions(**config)
 
-        wf = model_path / "weights.safetensors"
+        wf = model_path / "model.safetensors"
+        if not wf.exists():
+            wf = model_path / "weights.safetensors"
         if not wf.exists():
             wf = model_path / "weights.npz"
         weights = mx.load(str(wf))
