@@ -26,7 +26,7 @@ MODEL_REMAPPING = {
 
 # Models that require custom conversion from PyTorch source weights
 # These models have a convert_from_source() function in their module
-MODELS_WITH_CUSTOM_CONVERSION = {"cosyvoice2", "chatterbox"}
+MODELS_WITH_CUSTOM_CONVERSION = {"cosyvoice2", "cosyvoice3", "chatterbox"}
 MAX_FILE_SIZE_GB = 5
 MODEL_CONVERSION_DTYPES = ["float16", "bfloat16", "float32"]
 

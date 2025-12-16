@@ -1,3 +1,23 @@
+# Copyright (c) 2024 Alibaba Inc
+# Copyright (c) 2024 mlx-audio contributors
+#
+# Licensed under the Apache License, Version 2.0
+
+"""
+S3TokenizerV3 implementation for MLX.
+
+V3 is architecturally identical to V2, but with 12 transformer blocks instead of 6.
+This was reverse-engineered from speech_tokenizer_v3.onnx.
+
+Architecture:
+- n_mels: 128
+- n_audio_state: 1280
+- n_audio_head: 20
+- n_audio_layer: 12 (vs 6 in V2)
+- n_codebook_size: 6561 (3^8)
+- FSMN kernel_size: 31
+"""
+
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -5,257 +25,35 @@ from typing import Dict, Optional, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
-from einops.array_api import rearrange
 from huggingface_hub import snapshot_download
 from mlx.utils import tree_flatten
 
-from .model import MultiHeadAttention
+from .model_v2 import (
+    AudioEncoderV2,
+    FSMNMultiHeadAttention,
+    FSQVectorQuantization,
+    ResidualAttentionBlock,
+    apply_rotary_emb,
+    precompute_freqs_cis,
+)
 from .utils import make_non_pad_mask, mask_to_bias, merge_tokenized_segments
 
 
 @dataclass
-class ModelConfig:
+class ModelConfigV3:
+    """Configuration for S3TokenizerV3."""
+
     n_mels: int = 128
     n_audio_ctx: int = 1500
     n_audio_state: int = 1280
     n_audio_head: int = 20
-    n_audio_layer: int = 6
-    n_codebook_size: int = 3**8
+    n_audio_layer: int = 12  # V3 has 12 layers (vs 6 in V2)
+    n_codebook_size: int = 3**8  # 6561
 
 
-def precompute_freqs_cis(
-    dim: int, end: int, theta: float = 10000.0, scaling: Optional[float] = None
-) -> mx.array:
-    """Precompute frequency tensor for rotary embeddings"""
-    freqs = 1.0 / (
-        theta ** (mx.arange(0, dim, 2)[: (dim // 2)].astype(mx.float32) / dim)
-    )
-    t = mx.arange(end)
-    if scaling is not None:
-        t = t * scaling
-    freqs = mx.outer(t, freqs).astype(mx.float32)
-    cos_freqs = mx.cos(freqs)
-    sin_freqs = mx.sin(freqs)
-    cos_freqs = mx.concatenate([cos_freqs, cos_freqs], axis=-1)
-    sin_freqs = mx.concatenate([sin_freqs, sin_freqs], axis=-1)
-    return cos_freqs, sin_freqs
+class AudioEncoderV3(nn.Module):
+    """Audio encoder for V3 with 12 transformer blocks."""
 
-
-def apply_rotary_emb(
-    xq: mx.array,
-    xk: mx.array,
-    cos: mx.array,
-    sin: mx.array,
-) -> Tuple[mx.array, mx.array]:
-    """Apply rotary embeddings to query and key tensors"""
-    # Expand dimensions for broadcasting
-    cos = mx.expand_dims(mx.expand_dims(cos, axis=0), axis=2)
-    sin = mx.expand_dims(mx.expand_dims(sin, axis=0), axis=2)
-
-    D = xq.shape[-1]
-    # Split and rotate
-    xq_half_l, xq_half_r = xq[..., : D // 2], xq[..., D // 2 :]
-    xq_rotated = mx.concatenate([-xq_half_r, xq_half_l], axis=-1)
-
-    xk_half_l, xk_half_r = xk[..., : D // 2], xk[..., D // 2 :]
-    xk_rotated = mx.concatenate([-xk_half_r, xk_half_l], axis=-1)
-
-    # Apply rotation
-    xq_out = xq * cos + xq_rotated * sin
-    xk_out = xk * cos + xk_rotated * sin
-
-    return xq_out, xk_out
-
-
-class FSQCodebook(nn.Module):
-    """Finite Scalar Quantization Codebook"""
-
-    def __init__(self, dim: int, level: int = 3):
-        super().__init__()
-        self.project_down = nn.Linear(dim, 8)
-        self.level = level
-        self.embed = None
-
-    def preprocess(self, x: mx.array) -> mx.array:
-        x = rearrange(x, "... d -> (...) d")
-        return x
-
-    def encode(self, x: mx.array) -> mx.array:
-        x_shape = x.shape
-        # pre-process
-        x = self.preprocess(x)
-        # quantize
-        h = self.project_down(x).astype(mx.float32)
-        h = mx.tanh(h)
-        h = h * 0.9990000128746033
-        h = mx.round(h) + 1
-
-        # Create powers for base conversion
-        powers = mx.power(self.level, mx.arange(2**self.level, dtype=h.dtype))
-        mu = mx.sum(h * mx.expand_dims(powers, axis=0), axis=-1)
-        ind = mu.reshape(x_shape[0], x_shape[1]).astype(mx.int32)
-        return ind
-
-    def decode(self, embed_ind: mx.array) -> mx.array:
-        raise NotImplementedError("There is no official up project component provided")
-
-
-class FSQVectorQuantization(nn.Module):
-    """Finite Scalar Quantization Vector Quantization"""
-
-    def __init__(
-        self,
-        dim: int,
-        codebook_size: int,
-    ):
-        super().__init__()
-        assert 3**8 == codebook_size
-        self.fsq_codebook = FSQCodebook(dim=dim, level=3)
-        self.codebook_size = codebook_size
-
-    @property
-    def codebook(self):
-        return self.fsq_codebook.embed
-
-    def encode(self, x: mx.array) -> mx.array:
-        return self.fsq_codebook.encode(x)
-
-    def decode(self, embed_ind: mx.array) -> mx.array:
-        quantize = self.fsq_codebook.decode(embed_ind)
-        quantize = rearrange(quantize, "b n d -> b d n")
-        return quantize
-
-
-class FSMNMultiHeadAttention(MultiHeadAttention):
-    """Multi-head attention with FSMN (Feedforward Sequential Memory Network)"""
-
-    def __init__(
-        self,
-        n_state: int,
-        n_head: int,
-        kernel_size: int = 31,
-    ):
-        super().__init__(n_state, n_head)
-
-        self.fsmn_block = nn.Conv1d(
-            in_channels=n_state,
-            out_channels=n_state,
-            kernel_size=kernel_size,
-            stride=1,
-            padding=0,
-            groups=n_state,
-            bias=False,
-        )
-        self.left_padding = (kernel_size - 1) // 2
-        self.right_padding = kernel_size - 1 - self.left_padding
-
-    def forward_fsmn(
-        self, inputs: mx.array, mask: Optional[mx.array] = None
-    ) -> mx.array:
-        b, t, n, d = inputs.shape
-        inputs = inputs.reshape(b, t, -1)
-
-        if mask is not None and mask.shape[2] > 0:
-            inputs = inputs * mask
-
-        pad_left = mx.zeros((b, self.left_padding, inputs.shape[2]), dtype=inputs.dtype)
-        pad_right = mx.zeros(
-            (b, self.right_padding, inputs.shape[2]), dtype=inputs.dtype
-        )
-        x_padded = mx.concatenate([pad_left, inputs, pad_right], axis=1)
-        x = self.fsmn_block(x_padded)
-        x = x + inputs
-
-        if mask is not None:
-            x = x * mask
-
-        return x
-
-    def qkv_attention(
-        self,
-        q: mx.array,
-        k: mx.array,
-        v: mx.array,
-        mask: Optional[mx.array] = None,
-        mask_pad: Optional[mx.array] = None,
-        freqs_cis: Optional[Tuple[mx.array, mx.array]] = None,
-    ) -> Tuple[mx.array, mx.array | None, mx.array]:
-        B, T, D = q.shape
-        scale = (D // self.n_head) ** -0.25
-
-        q = q.reshape(B, T, self.n_head, -1)
-        k = k.reshape(B, T, self.n_head, -1)
-        v = v.reshape(B, T, self.n_head, -1)
-
-        if freqs_cis is not None:
-            cos, sin = freqs_cis
-            q, k = apply_rotary_emb(q, k, cos[:T], sin[:T])
-
-        fsm_memory = self.forward_fsmn(v, mask_pad)
-
-        q = q.transpose(0, 2, 1, 3) * scale
-        k = k.transpose(0, 2, 1, 3) * scale
-        v = v.transpose(0, 2, 1, 3)
-
-        output = mx.fast.scaled_dot_product_attention(q, k, v, scale=1, mask=mask)
-        output = output.transpose(0, 2, 1, 3).reshape(B, T, D)
-
-        return output, None, fsm_memory
-
-    def __call__(
-        self,
-        x: mx.array,
-        mask: Optional[mx.array] = None,
-        mask_pad: Optional[mx.array] = None,
-        freqs_cis: Optional[Tuple[mx.array, mx.array]] = None,
-    ) -> Tuple[mx.array, mx.array | None]:
-        q = self.query(x)
-        k = self.key(x)
-        v = self.value(x)
-
-        wv, qk, fsm_memory = self.qkv_attention(q, k, v, mask, mask_pad, freqs_cis)
-        return self.out(wv) + fsm_memory, qk
-
-
-class ResidualAttentionBlock(nn.Module):
-    """Residual attention block with FSMN"""
-
-    def __init__(
-        self,
-        n_state: int,
-        n_head: int,
-        kernel_size: int = 31,
-    ):
-        super().__init__()
-
-        self.attn = FSMNMultiHeadAttention(n_state, n_head, kernel_size)
-        self.attn_ln = nn.LayerNorm(n_state, eps=1e-6)
-
-        n_mlp = n_state * 4
-        self.mlp = nn.Sequential(
-            nn.Linear(n_state, n_mlp), nn.GELU(), nn.Linear(n_mlp, n_state)
-        )
-        self.mlp_ln = nn.LayerNorm(n_state)
-
-    def __call__(
-        self,
-        x: mx.array,
-        mask: Optional[mx.array] = None,
-        mask_pad: Optional[mx.array] = None,
-        freqs_cis: Optional[Tuple[mx.array, mx.array]] = None,
-    ) -> mx.array:
-        x = (
-            x
-            + self.attn(
-                self.attn_ln(x), mask=mask, mask_pad=mask_pad, freqs_cis=freqs_cis
-            )[0]
-        )
-
-        x = x + self.mlp(self.mlp_ln(x))
-        return x
-
-
-class AudioEncoderV2(nn.Module):
     def __init__(
         self,
         n_mels: int,
@@ -282,8 +80,10 @@ class AudioEncoderV2(nn.Module):
             padding=1,
         )
 
+        # Precompute rotary embeddings
         self._freqs_cis = precompute_freqs_cis(64, 1024 * 2)
 
+        # 12 transformer blocks for V3
         self.blocks = [ResidualAttentionBlock(n_state, n_head) for _ in range(n_layer)]
 
     def __call__(self, x: mx.array, x_len: mx.array) -> Tuple[mx.array, mx.array]:
@@ -321,24 +121,27 @@ class AudioEncoderV2(nn.Module):
         return x, x_len
 
 
-class S3TokenizerV2(nn.Module):
-    """S3 tokenizer v2 implementation.
+class S3TokenizerV3(nn.Module):
+    """S3 tokenizer V3 implementation for MLX.
+
+    V3 has the same architecture as V2 but with 12 transformer blocks
+    instead of 6.
+
     Args:
-        config (ModelConfig): Config
+        config (ModelConfigV3): Model configuration
     """
 
-    def __init__(self, name: str, config: ModelConfig = ModelConfig()):
+    def __init__(
+        self, name: str = "speech_tokenizer_v3", config: ModelConfigV3 = ModelConfigV3()
+    ):
         super().__init__()
-        if "v1" not in name:
-            assert "v2" in name
-            config.n_codebook_size = 3**8
         self.config = config
-        self.encoder = AudioEncoderV2(
+        self.encoder = AudioEncoderV3(
             self.config.n_mels,
             self.config.n_audio_state,
             self.config.n_audio_head,
             self.config.n_audio_layer,
-            2,
+            2,  # stride
         )
         self.quantizer = FSQVectorQuantization(
             self.config.n_audio_state,
@@ -498,7 +301,7 @@ class S3TokenizerV2(nn.Module):
         for batch_idx in range(batch_size):
             if bool(long_audio_mask[batch_idx].item()):
                 audio_codes = results[batch_idx]
-                token_rate = 25  # V2 uses 25Hz
+                token_rate = 25  # V3 uses 25Hz like V2
                 merged_codes = merge_tokenized_segments(
                     audio_codes, overlap=overlap, token_rate=token_rate
                 )
@@ -540,6 +343,7 @@ class S3TokenizerV2(nn.Module):
         return code, code_len
 
     def sanitize(self, weights: Dict[str, mx.array]) -> Dict[str, mx.array]:
+        """Sanitize weights from ONNX format to MLX format."""
         new_weights = {}
 
         # Get expected shapes from model for idempotent transposition
@@ -552,13 +356,11 @@ class S3TokenizerV2(nn.Module):
             if "freqs_cis" in key or "_mel_filters" in key:
                 continue
 
-            # Skip ONNX intermediate nodes (raw ONNX weight names)
+            # Skip ONNX intermediate nodes
             if key.startswith("onnx::"):
                 continue
 
-            # Quantizer key mappings:
-            # - quantizer._codebook -> quantizer.fsq_codebook (PyTorch private attr)
-            # - quantizer.codebook -> quantizer.fsq_codebook (alternative naming)
+            # Quantizer key mappings
             new_key = new_key.replace("quantizer._codebook.", "quantizer.fsq_codebook.")
             new_key = new_key.replace("quantizer.codebook.", "quantizer.fsq_codebook.")
 
@@ -566,7 +368,6 @@ class S3TokenizerV2(nn.Module):
             new_key = re.sub(r"\.mlp\.(\d+)\.", r".mlp.layers.\1.", new_key)
 
             # Conv1d weights need transposition (idempotent)
-            # Only transpose if shape doesn't match expected MLX format
             if (
                 ".conv1." in new_key
                 or ".conv2." in new_key
@@ -588,26 +389,128 @@ class S3TokenizerV2(nn.Module):
     @classmethod
     def from_pretrained(
         cls,
-        name: str,
-        repo_id: str = "mlx-community/S3TokenizerV2",
-    ) -> "S3TokenizerV2":
+        name: str = "speech_tokenizer_v3",
+        repo_id: str = "mlx-community/S3TokenizerV3",
+    ) -> "S3TokenizerV3":
+        """Load a pretrained S3TokenizerV3 model."""
         path = fetch_from_hub(repo_id)
         if path is None:
             raise ValueError(f"Could not find model {path}")
 
-        model = S3TokenizerV2(name)
+        model = S3TokenizerV3(name)
         model_path = path / "model.safetensors"
         weights = mx.load(model_path.as_posix(), format="safetensors")
+        weights = model.sanitize(weights)
+        model.load_weights(list(weights.items()))
+        mx.eval(model.parameters())
+
+        return model
+
+    @classmethod
+    def from_onnx(cls, onnx_path: str) -> "S3TokenizerV3":
+        """
+        Load S3TokenizerV3 from an ONNX file.
+
+        This extracts weights from the ONNX model and loads them into MLX.
+
+        Args:
+            onnx_path: Path to speech_tokenizer_v3.onnx
+
+        Returns:
+            S3TokenizerV3 model loaded with weights
+        """
+        import numpy as np
+        import onnx
+
+        onnx_model = onnx.load(onnx_path)
+
+        # Extract weights from ONNX
+        weights = {}
+        initializer_map = {init.name: init for init in onnx_model.graph.initializer}
+
+        for node in onnx_model.graph.node:
+            for input_name in node.input:
+                if input_name not in initializer_map:
+                    continue
+
+                initializer = initializer_map[input_name]
+                weight_array = onnx.numpy_helper.to_array(initializer).copy()
+
+                # Map ONNX names to our model names
+                weight_name = _map_onnx_name_v3(input_name, node)
+                if weight_name:
+                    # Handle LayerNorm specially
+                    if node.op_type == "LayerNormalization":
+                        ln_name = node.name.replace("/LayerNormalization", "")
+                        ln_inputs = node.input
+                        scale_name = ln_inputs[1]
+                        bias_name = ln_inputs[2]
+
+                        if input_name == scale_name:
+                            weights[ln_name + ".weight"] = mx.array(weight_array)
+                        elif input_name == bias_name:
+                            weights[ln_name + ".bias"] = mx.array(weight_array)
+                    else:
+                        # Transpose linear weights
+                        if len(weight_array.shape) == 2:
+                            weight_array = weight_array.T
+                        weights[weight_name] = mx.array(weight_array)
+
+        # Create model and load weights
+        model = cls()
+        weights = model.sanitize(weights)
         model.load_weights(list(weights.items()))
         mx.eval(model.parameters())
 
         return model
 
 
-# fetch model from hub
+def _map_onnx_name_v3(input_name: str, node) -> Optional[str]:
+    """Map ONNX weight names to MLX model names for V3."""
+    # Conv weights
+    if input_name == "onnx::Conv_3986":
+        return "encoder.conv1.weight"
+    elif input_name == "onnx::Conv_3987":
+        return "encoder.conv1.bias"
+    elif input_name == "onnx::Conv_3988":
+        return "encoder.conv2.weight"
+    elif input_name == "onnx::Conv_3989":
+        return "encoder.conv2.bias"
+
+    # Quantizer - project_down layer (Linear 1280 -> 8)
+    if input_name == "quantizer.project_in.bias":
+        return "quantizer.fsq_codebook.project_down.bias"
+    if input_name == "onnx::MatMul_4618":
+        # This is the quantizer's project_down weight (shape: [1280, 8])
+        return "quantizer.fsq_codebook.project_down.weight"
+    if "project_down" in input_name or "project_in" in input_name:
+        if "weight" in input_name.lower() or "MatMul" in node.name:
+            return "quantizer.fsq_codebook.project_down.weight"
+
+    # Block weights - handled by node name
+    if "blocks" in input_name:
+        # These are FSMN weights with explicit names
+        return "encoder." + input_name
+
+    # Use node name for transformer block weights
+    if "blocks" in node.name:
+        new_name = (
+            node.name[1:]
+            .replace("/", ".")
+            .replace("MatMul", "weight")
+            .replace("Add_1", "bias")
+            .replace("Mul", "weight")
+            .replace("Add", "bias")
+            .replace("mlp.mlp", "mlp")
+            .replace("fsmn_block.Conv", "fsmn_block.weight")
+        )
+        return f"encoder.{new_name}"
+
+    return None
 
 
 def fetch_from_hub(hf_repo: str) -> Path:
+    """Fetch model from Hugging Face Hub."""
     model_path = Path(
         snapshot_download(
             repo_id=hf_repo,

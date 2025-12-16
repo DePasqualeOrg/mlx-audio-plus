@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Convert CosyVoice2 PyTorch weights to MLX format.
+Convert CosyVoice 2 PyTorch weights to MLX format.
 
 Usage:
     # Convert to local directory
@@ -579,7 +579,7 @@ def convert_from_source(
     dry_run: bool = False,
 ) -> None:
     """
-    Convert CosyVoice2 PyTorch weights to MLX format.
+    Convert CosyVoice 2 PyTorch weights to MLX format.
 
     This function is called by the central conversion utility when it detects
     a CosyVoice2 model, or can be called directly.
@@ -606,7 +606,7 @@ def convert_from_source(
     target_dtype = dtype_map.get(dtype, np.float16) if dtype else np.float16
     dtype_name = dtype or "float16"
 
-    print(f"Converting CosyVoice2 from {model_id}")
+    print(f"Converting CosyVoice 2 from {model_id}")
     print(f"Output directory: {output_dir}")
     print(f"Target dtype: {dtype_name}")
     if quantize:
@@ -814,8 +814,8 @@ def convert_from_source(
 
 
 def main():
-    """CLI entry point for CosyVoice2 conversion."""
-    parser = argparse.ArgumentParser(description="Convert CosyVoice2 to MLX")
+    """CLI entry point for CosyVoice 2 conversion."""
+    parser = argparse.ArgumentParser(description="Convert CosyVoice 2 to MLX")
     parser.add_argument(
         "--model-id",
         default="FunAudioLLM/CosyVoice2-0.5B",

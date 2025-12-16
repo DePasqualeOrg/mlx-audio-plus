@@ -7,7 +7,7 @@ safetensors format. It uses the model's own sanitize() methods to ensure
 consistency between conversion and runtime loading.
 
 The S3Tokenizer is converted separately and uploaded to its own repo, as it's
-shared between multiple TTS models (Chatterbox, CosyVoice2, etc.).
+shared between multiple TTS models (Chatterbox, CosyVoice 2, etc.).
 
 Usage:
     # Convert Chatterbox (without S3Tokenizer) to fp16
@@ -265,7 +265,7 @@ tags:
 
 S3TokenizerV2 (Supervised Semantic Speech Tokenizer) converted to MLX format from [FunAudioLLM/CosyVoice2-0.5B](https://huggingface.co/FunAudioLLM/CosyVoice2-0.5B).
 
-This tokenizer is automatically downloaded when using Chatterbox or CosyVoice2 with [mlx-audio-plus](https://github.com/DePasqualeOrg/mlx-audio-plus).
+This tokenizer is automatically downloaded when using Chatterbox or CosyVoice 2 with [mlx-audio-plus](https://github.com/DePasqualeOrg/mlx-audio-plus).
 """
     card_path = path / "README.md"
     with open(card_path, "w") as f:
@@ -298,7 +298,7 @@ def convert_s3_tokenizer(
     Convert S3Tokenizer weights to MLX format (standalone).
 
     This creates a separate repo for the S3Tokenizer, which is shared between
-    multiple TTS models (Chatterbox, CosyVoice2, etc.).
+    multiple TTS models (Chatterbox, CosyVoice 2, etc.).
 
     Args:
         output_dir: Directory to save converted weights
