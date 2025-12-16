@@ -6,7 +6,8 @@ This fork removes a large amount of cruft (incompatibly licensed code and data t
 
 - TTS
   - [Chatterbox](https://github.com/resemble-ai/chatterbox)
-  - [CosyVoice2](https://github.com/FunAudioLLM/CosyVoice)
+  - [CosyVoice 2](https://github.com/FunAudioLLM/CosyVoice)
+  - [CosyVoice 3](https://github.com/FunAudioLLM/CosyVoice)
 - STT
   - [Fun-ASR](https://github.com/modelscope/FunASR)
 
@@ -25,30 +26,30 @@ pip install mlx-audio-plus
 ### CLI
 
 ```bash
-# CosyVoice2: zero-shot mode (reference audio + transcription)
-mlx_audio.tts.generate --model mlx-community/CosyVoice2-0.5B-4bit \
+# CosyVoice 3: cross-lingual mode (reference audio only)
+mlx_audio.tts.generate --model mlx-community/Fun-CosyVoice3-0.5B-2512-4bit \
+    --text "Hello, this is a test of text to speech." \
+    --ref_audio reference.wav
+
+# CosyVoice 3: zero-shot mode (with transcription for better quality)
+mlx_audio.tts.generate --model mlx-community/Fun-CosyVoice3-0.5B-2512-4bit \
     --text "Hello, this is a test of text to speech." \
     --ref_audio reference.wav \
     --ref_text "This is what I said in the reference audio."
 
-# CosyVoice2: cross-lingual mode (no transcription)
-mlx_audio.tts.generate --model mlx-community/CosyVoice2-0.5B-4bit \
-    --text "Bonjour, comment allez-vous?" \
-    --ref_audio reference.wav
-
-# CosyVoice2: instruct mode with style control
-mlx_audio.tts.generate --model mlx-community/CosyVoice2-0.5B-4bit \
+# CosyVoice 3: instruct mode with style control
+mlx_audio.tts.generate --model mlx-community/Fun-CosyVoice3-0.5B-2512-4bit \
     --text "I have exciting news!" \
     --ref_audio reference.wav \
     --instruct_text "Speak with excitement and enthusiasm"
 
-# CosyVoice2: voice conversion
-mlx_audio.tts.generate --model mlx-community/CosyVoice2-0.5B-4bit \
+# CosyVoice 3: voice conversion
+mlx_audio.tts.generate --model mlx-community/Fun-CosyVoice3-0.5B-2512-4bit \
     --ref_audio target_speaker.wav \
     --source_audio source_speech.wav
 
 # Play audio directly instead of saving
-mlx_audio.tts.generate --model mlx-community/CosyVoice2-0.5B-4bit \
+mlx_audio.tts.generate --model mlx-community/Fun-CosyVoice3-0.5B-2512-4bit \
     --text "Hello world" \
     --ref_audio reference.wav \
     --play
@@ -64,35 +65,34 @@ mlx_audio.tts.generate --model mlx-community/Chatterbox-TTS-4bit \
 ```python
 from mlx_audio.tts.generate import generate_audio
 
-# CosyVoice2: zero-shot mode (reference audio + transcription)
+# CosyVoice 3: cross-lingual mode (reference audio only)
 generate_audio(
     text="Hello, this is a test of text to speech.",
-    model="mlx-community/CosyVoice2-0.5B-4bit",
+    model="mlx-community/Fun-CosyVoice3-0.5B-2512-4bit",
     ref_audio="reference.wav",
-    ref_text="This is what I said in the reference audio.",  # Optional
     file_prefix="output",  # Optional
     audio_format="wav",  # Optional
 )
 
-# CosyVoice2: cross-lingual mode (no transcription needed)
+# CosyVoice 3: zero-shot mode (with transcription for better quality)
 generate_audio(
     text="Bonjour, comment allez-vous aujourd'hui?",
-    model="mlx-community/CosyVoice2-0.5B-4bit",
+    model="mlx-community/Fun-CosyVoice3-0.5B-2512-4bit",
     ref_audio="reference.wav",
+    ref_text="This is what I said in the reference audio.",
 )
 
-# CosyVoice2: instruct mode with style control
+# CosyVoice 3: instruct mode with style control
 generate_audio(
     text="I have some exciting news to share with you!",
-    model="mlx-community/CosyVoice2-0.5B-4bit",
+    model="mlx-community/Fun-CosyVoice3-0.5B-2512-4bit",
     ref_audio="reference.wav",
     instruct_text="Speak with excitement and enthusiasm",
 )
 
-# CosyVoice2: voice conversion (convert source audio to target speaker)
+# CosyVoice 3: voice conversion (convert source audio to target speaker)
 generate_audio(
-    text="",  # Not used in VC mode
-    model="mlx-community/CosyVoice2-0.5B-4bit",
+    model="mlx-community/Fun-CosyVoice3-0.5B-2512-4bit",
     ref_audio="target_speaker.wav",  # Target voice
     source_audio="source_speech.wav",
 )
