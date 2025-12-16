@@ -518,10 +518,18 @@ class Model(nn.Module):
         if word_timestamps and task == "translate":
             warnings.warn("Word-level timestamps on translations may not be reliable.")
 
-        def decode_with_fallback(segment: mx.array) -> DecodingResult:
+        def decode_with_fallback(
+            segment: mx.array, segment_duration: float = 30.0
+        ) -> DecodingResult:
             temperatures = (
                 [temperature] if isinstance(temperature, (int, float)) else temperature
             )
+
+            # Optimization: Use fewer temperature steps for very short segments where
+            # fallbacks are unlikely to help and just waste time
+            if segment_duration < 2.0 and len(temperatures) > 3:
+                temperatures = [0.0, 0.5, 1.0]
+
             decode_result = None
 
             for t in temperatures:
@@ -614,7 +622,9 @@ class Model(nn.Module):
                     )
 
                     decode_options["prompt"] = all_tokens[prompt_reset_since:]
-                    result: DecodingResult = decode_with_fallback(mel_segment)
+                    result: DecodingResult = decode_with_fallback(
+                        mel_segment, segment_duration
+                    )
 
                     tokens = np.array(result.tokens)
 
@@ -720,7 +730,11 @@ class Model(nn.Module):
                                 tokens[last_slice - 1].item()
                                 - tokenizer.timestamp_begin
                             )
-                            seek += last_timestamp_pos * input_stride
+                            # Sanity check: don't let hallucinated timestamps cause seek to jump beyond segment.
+                            # The model can hallucinate timestamps pointing far into the future (e.g., 25s when
+                            # only 2s of audio remains), which would cause seek to jump past the end of content.
+                            timestamp_seek = last_timestamp_pos * input_stride
+                            seek += min(timestamp_seek, segment_size)
                     else:
                         duration = segment_duration
                         timestamps = tokens[timestamp_tokens.nonzero()[0]]
@@ -761,6 +775,20 @@ class Model(nn.Module):
                                 seek += segment_size
                         else:
                             seek += segment_size
+
+                    # Filter out segments with timestamps that exceed the segment window.
+                    # This catches hallucinations where model generates impossible timestamps
+                    # (e.g., 20s into a 2s segment). Allow 1s tolerance for rounding.
+                    current_segments = [
+                        s
+                        for s in current_segments
+                        if (s["end"] - time_offset) <= segment_duration + 1.0
+                    ]
+
+                    # Filter segments with very low confidence after temperature exhaustion
+                    # These are likely hallucinations from silence/unclear audio at end of content
+                    if result.temperature >= 0.8 and result.avg_logprob < -2.0:
+                        current_segments = []
 
                     if word_timestamps:
                         add_word_timestamps(
