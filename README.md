@@ -6,7 +6,9 @@ This fork removes a large amount of cruft (incompatibly licensed code and data t
 
 - TTS
   - [Chatterbox](https://github.com/resemble-ai/chatterbox)
-  - [CosyVoice2](https://huggingface.co/FunAudioLLM/CosyVoice2-0.5B)
+  - [CosyVoice2](https://github.com/FunAudioLLM/CosyVoice)
+- STT
+  - [Fun-ASR](https://github.com/modelscope/FunASR)
 
 Improvements to the upstream repo will continue to be merged here.
 
@@ -101,5 +103,37 @@ generate_audio(
     model="mlx-community/Chatterbox-TTS-4bit",
     ref_audio="reference.wav",
 )
+```
+
+### Speech to text
+
+```python
+from mlx_audio.stt.models.funasr import Model
+
+# Fun-ASR
+
+# Load the model
+model = Model.from_pretrained("mlx-community/Fun-ASR-Nano-2512-4bit")
+
+# Basic transcription
+result = model.generate("audio.wav")
+print(result.text)
+
+# Translation (speech to English text)
+result = model.generate(
+    "chinese_speech.wav",
+    task="translate",
+    target_language="en"
+)
+
+# Custom prompting for domain-specific content
+result = model.generate(
+    "medical_dictation.wav",
+    initial_prompt="Medical consultation discussing cardiac symptoms."
+)
+
+# Streaming output
+for chunk in model.generate("audio.wav", stream=True):
+    print(chunk, end="", flush=True)
 ```
 
