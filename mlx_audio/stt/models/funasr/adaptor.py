@@ -11,6 +11,8 @@ from typing import Optional, Tuple
 import mlx.core as mx
 import mlx.nn as nn
 
+from .encoder import PositionwiseFeedForward
+
 
 @dataclass
 class AudioAdaptorConfig:
@@ -67,44 +69,23 @@ class MultiHeadedAttention(nn.Module):
         k = k.reshape(batch_size, -1, self.h, self.d_k).transpose(0, 2, 1, 3)
         v = v.reshape(batch_size, -1, self.h, self.d_k).transpose(0, 2, 1, 3)
 
-        # Compute attention scores
-        scores = (q @ k.swapaxes(-2, -1)) / (self.d_k**0.5)
-
-        # Apply mask if provided
+        # Convert mask to additive format for fast attention if provided
+        attn_mask = None
         if mask is not None:
-            scores = mx.where(mask == 0, mx.array(float("-inf")), scores)
+            attn_mask = mx.where(mask == 0, mx.array(float("-inf")), mx.array(0.0))
 
-        attn = mx.softmax(scores, axis=-1)
-        attn = self.dropout(attn)
+        # Use fast scaled dot-product attention
+        context = mx.fast.scaled_dot_product_attention(
+            q, k, v, scale=self.d_k**-0.5, mask=attn_mask
+        )
 
-        # Apply attention to values
-        context = attn @ v
+        # Apply dropout after attention
+        context = self.dropout(context)
 
         # Reshape back
         context = context.transpose(0, 2, 1, 3).reshape(batch_size, -1, self.n_feat)
 
         return self.linear_out(context)
-
-
-class PositionwiseFeedForward(nn.Module):
-    """
-    Positionwise feed-forward network with ReLU activation.
-    """
-
-    def __init__(
-        self,
-        d_model: int,
-        d_ff: int,
-        dropout: float = 0.0,
-    ):
-        super().__init__()
-        self.w_1 = nn.Linear(d_model, d_ff, bias=True)
-        self.w_2 = nn.Linear(d_ff, d_model, bias=True)
-        self.dropout = nn.Dropout(dropout)
-
-    def __call__(self, x: mx.array) -> mx.array:
-        # Original: w_2(dropout(relu(w_1(x)))) - single dropout after activation
-        return self.w_2(self.dropout(nn.relu(self.w_1(x))))
 
 
 class EncoderLayer(nn.Module):

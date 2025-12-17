@@ -174,30 +174,25 @@ class MultiHeadedAttentionSANM(nn.Module):
         k_h = k.reshape(batch_size, seq_len, self.h, self.d_k).transpose(0, 2, 1, 3)
         v_h = v.reshape(batch_size, seq_len, self.h, self.d_k).transpose(0, 2, 1, 3)
 
-        # Scale query BEFORE computing scores (matches original)
-        q_h = q_h * (self.d_k**-0.5)
-
-        # Compute attention scores
-        scores = q_h @ k_h.swapaxes(-2, -1)
-
-        # Apply mask to scores if provided
+        # Convert mask to additive format for fast attention if provided
+        attn_mask = None
         if mask is not None:
-            # Convert mask for attention
             if mask.ndim == 2:
                 attn_mask = mask[:, None, None, :]  # (batch, 1, 1, seq)
             elif mask.ndim == 3:
                 attn_mask = mask[:, None, :, :]  # (batch, 1, seq, seq)
             else:
                 attn_mask = mask
-            # Mask where 0 -> -inf
-            scores = mx.where(attn_mask == 0, mx.array(float("-inf")), scores)
+            # Convert boolean/binary mask to additive mask (0 -> -inf for masked positions)
+            attn_mask = mx.where(attn_mask == 0, mx.array(float("-inf")), mx.array(0.0))
 
-        # Softmax and dropout
-        attn = mx.softmax(scores, axis=-1)
-        attn = self.dropout(attn)
+        # Use fast scaled dot-product attention
+        context = mx.fast.scaled_dot_product_attention(
+            q_h, k_h, v_h, scale=self.d_k**-0.5, mask=attn_mask
+        )
 
-        # Apply attention to values
-        context = attn @ v_h  # (batch, n_head, seq, d_k)
+        # Apply dropout after attention
+        context = self.dropout(context)
 
         # Reshape back: (batch, n_head, seq, d_k) -> (batch, seq, n_feat)
         context = context.transpose(0, 2, 1, 3).reshape(

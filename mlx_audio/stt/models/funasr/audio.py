@@ -85,67 +85,7 @@ def apply_lfr(
     Apply Low Frame Rate (LFR) processing to features.
 
     This stacks consecutive frames and subsamples to reduce the frame rate.
-    Matches the original FunASR implementation exactly.
-
-    Parameters
-    ----------
-    features : mx.array, shape = (n_frames, n_mels)
-        Input mel spectrogram features
-    lfr_m : int
-        Number of frames to stack (default: 7)
-    lfr_n : int
-        Subsampling factor (default: 6)
-
-    Returns
-    -------
-    mx.array, shape = (ceil(n_frames / lfr_n), n_mels * lfr_m)
-        LFR-processed features with stacked frames
-    """
-    T, n_mels = features.shape
-
-    # Output length uses ceiling division (matches original)
-    T_lfr = int(math.ceil(T / lfr_n))
-
-    # Left padding only (matches original)
-    left_pad = (lfr_m - 1) // 2
-    if left_pad > 0:
-        left_padding = mx.broadcast_to(features[0:1], (left_pad, n_mels))
-        features = mx.concatenate([left_padding, features], axis=0)
-
-    T_padded = features.shape[0]
-
-    # Build indices for gathering frames - vectorized approach
-    # For each output frame i, we gather frames [i*lfr_n : i*lfr_n + lfr_m]
-    output_frames = []
-    for i in range(T_lfr):
-        start_idx = i * lfr_n
-        if lfr_m <= T_padded - start_idx:
-            # Normal case: enough frames available
-            frame = features[start_idx : start_idx + lfr_m].reshape(-1)
-        else:
-            # Last frame case: need to pad with the last frame
-            available = T_padded - start_idx
-            frame_parts = [features[start_idx:].reshape(-1)]
-            # Pad with last frame repeated
-            num_padding = lfr_m - available
-            last_frame = features[-1]
-            for _ in range(num_padding):
-                frame_parts.append(last_frame)
-            frame = mx.concatenate(frame_parts)
-        output_frames.append(frame)
-
-    return mx.stack(output_frames, axis=0)
-
-
-def apply_lfr_vectorized(
-    features: mx.array,
-    lfr_m: int = LFR_M,
-    lfr_n: int = LFR_N,
-) -> mx.array:
-    """
-    Vectorized LFR implementation using gather operations.
-
-    This is more efficient for MLX as it avoids Python loops.
+    Uses vectorized gather operations for efficiency.
 
     Parameters
     ----------
@@ -274,8 +214,8 @@ def preprocess_audio(
     # Compute log mel spectrogram
     mel_features = log_mel_spectrogram(audio, n_mels=n_mels)
 
-    # Apply LFR processing (use vectorized version for efficiency)
-    lfr_features = apply_lfr_vectorized(mel_features, lfr_m=lfr_m, lfr_n=lfr_n)
+    # Apply LFR processing
+    lfr_features = apply_lfr(mel_features, lfr_m=lfr_m, lfr_n=lfr_n)
 
     # Apply normalization
     if apply_normalization:
