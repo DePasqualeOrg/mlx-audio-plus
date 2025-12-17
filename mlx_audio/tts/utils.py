@@ -11,9 +11,6 @@ import mlx.core as mx
 import mlx.nn as nn
 from huggingface_hub import snapshot_download
 from mlx.utils import tree_flatten
-from mlx_lm.convert import mixed_quant_predicate_builder
-from mlx_lm.utils import dequantize_model, quantize_model, save_config, save_model
-from transformers import AutoConfig
 
 MODEL_REMAPPING = {
     "outetts": "outetts",
@@ -149,6 +146,8 @@ def load_config(model_path: Union[str, Path], **kwargs) -> dict:
     Raises:
         FileNotFoundError: If config.json is not found at the path
     """
+    from transformers import AutoConfig
+
     if isinstance(model_path, str):
         model_path = get_model_path(model_path)
 
@@ -393,34 +392,8 @@ def convert(
     trust_remote_code: bool = True,
     quant_predicate: Optional[str] = None,
 ):
-    # Check if this model requires custom conversion from PyTorch source
-    detected_model_type = _detect_model_type_from_path(hf_path)
-    if detected_model_type in MODELS_WITH_CUSTOM_CONVERSION:
-        print(f"[INFO] Model type '{detected_model_type}' requires custom conversion")
-        try:
-            arch = importlib.import_module(
-                f"mlx_audio.tts.models.{detected_model_type}"
-            )
-            if hasattr(arch, "convert_from_source"):
-                print(f"[INFO] Using custom converter for {detected_model_type}")
-                arch.convert_from_source(
-                    model_id=hf_path,
-                    output_dir=Path(mlx_path),
-                    quantize=quantize,
-                    q_bits=q_bits,
-                    q_group_size=q_group_size,
-                    dtype=dtype,
-                    upload_repo=upload_repo,
-                )
-                return
-            else:
-                print(
-                    f"[WARN] No convert_from_source() found for {detected_model_type}, using standard conversion"
-                )
-        except ImportError as e:
-            print(
-                f"[WARN] Could not import {detected_model_type}: {e}, using standard conversion"
-            )
+    from mlx_lm.convert import mixed_quant_predicate_builder
+    from mlx_lm.utils import dequantize_model, quantize_model, save_config, save_model
 
     print("[INFO] Loading")
     model_path = get_model_path(hf_path, revision=revision)
