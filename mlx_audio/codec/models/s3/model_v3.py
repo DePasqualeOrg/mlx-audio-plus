@@ -400,7 +400,6 @@ class S3TokenizerV3(nn.Module):
         model = S3TokenizerV3(name)
         model_path = path / "model.safetensors"
         weights = mx.load(model_path.as_posix(), format="safetensors")
-        weights = model.sanitize(weights)
         model.load_weights(list(weights.items()))
         mx.eval(model.parameters())
 

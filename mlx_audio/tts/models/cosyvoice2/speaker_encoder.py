@@ -80,8 +80,6 @@ class CAMPlusSpeakerEncoder:
                 except Exception:
                     weights = dict(mx.load(str(path)))
 
-            # Sanitize weights (handles PyTorch -> MLX conversion)
-            weights = self.model.sanitize(weights)
             self.model.load_weights(list(weights.items()))
             # Set eval mode for inference (BatchNorm uses running stats)
             self.model.eval()

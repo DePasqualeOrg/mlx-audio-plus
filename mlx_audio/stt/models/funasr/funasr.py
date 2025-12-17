@@ -954,9 +954,6 @@ class Model(nn.Module):
         for wf in weight_files:
             weights.update(mx.load(str(wf)))
 
-        # Sanitize weights
-        weights = model.sanitize(weights)
-
         # Cast to dtype (skip quantized weights which have specific dtypes)
         def should_cast(key: str, value: mx.array) -> bool:
             # Don't cast quantization scales/biases or already-quantized weights

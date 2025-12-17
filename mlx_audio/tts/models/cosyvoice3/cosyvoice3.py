@@ -913,9 +913,6 @@ class Model(nn.Module):
                 }
                 if campplus_weights:
                     self._speaker_encoder = CAMPlusSpeakerEncoder()
-                    campplus_weights = self._speaker_encoder.model.sanitize(
-                        campplus_weights
-                    )
                     self._speaker_encoder.model.load_weights(
                         list(campplus_weights.items())
                     )
