@@ -1088,13 +1088,13 @@ class Model(nn.Module):
             and instruct_text is None
         ):
             if verbose:
-                print("Transcribing reference audio with Whisper...")
+                logger.info("Transcribing reference audio with Whisper...")
             from mlx_audio.stt.models.whisper import Model as Whisper
 
             whisper = Whisper.from_pretrained(path_or_hf_repo=stt_model)
             ref_text = whisper.generate(ref_audio_16k).text
             if verbose:
-                print(f"Transcription: {ref_text}")
+                logger.info(f"Transcription: {ref_text}")
             # Clean up whisper model to free memory
             del whisper
             mx.clear_cache()

@@ -399,15 +399,17 @@ def stft(
     pad_len = n_fft // 2
     x = mx.pad(x, [(0, 0), (pad_len, pad_len)])
 
-    # Frame the signal
+    # Frame the signal using strided view (vectorized)
     n_frames = (x.shape[1] - n_fft) // hop_len + 1
-    frames = []
-    for i in range(n_frames):
-        start = i * hop_len
-        frame = x[:, start : start + n_fft] * window
-        frames.append(frame)
 
-    frames = mx.stack(frames, axis=1)  # (B, n_frames, n_fft)
+    # Use mx.as_strided to extract all frames at once (per batch element)
+    # This replaces the Python loop over n_frames with vectorized operations
+    frames_list = []
+    for b in range(B):
+        # Extract frames for this batch element using strided view
+        frames_b = mx.as_strided(x[b], shape=(n_frames, n_fft), strides=(hop_len, 1))
+        frames_list.append(frames_b * window)
+    frames = mx.stack(frames_list, axis=0)  # (B, n_frames, n_fft)
 
     # FFT
     spec = mx.fft.rfft(frames, axis=-1)
@@ -459,17 +461,30 @@ def istft(
     # Apply window
     frames = frames * window
 
-    # Overlap-add with window normalization
+    # Overlap-add with window normalization (vectorized)
     B, n_frames, _ = frames.shape
     output_len = n_fft + (n_frames - 1) * hop_len
-    output = mx.zeros((B, output_len))
-    window_sum = mx.zeros((1, output_len))
     window_sq = window * window
 
-    for i in range(n_frames):
-        start = i * hop_len
-        output = output.at[:, start : start + n_fft].add(frames[:, i, :])
-        window_sum = window_sum.at[:, start : start + n_fft].add(window_sq)
+    # Compute all frame indices at once
+    frame_offsets = mx.arange(n_frames) * hop_len
+    indices = frame_offsets[:, None] + mx.arange(n_fft)  # (n_frames, n_fft)
+    indices_flat = indices.flatten()
+
+    # Compute window sum once (same for all batches)
+    window_updates = mx.tile(window_sq, (n_frames,))
+    window_sum = mx.zeros((output_len,))
+    window_sum = window_sum.at[indices_flat].add(window_updates)
+    window_sum = mx.expand_dims(window_sum, 0)  # (1, output_len)
+
+    # Overlap-add for each batch element (vectorized over frames)
+    output_list = []
+    for b in range(B):
+        out_b = mx.zeros((output_len,))
+        updates = frames[b].flatten()  # (n_frames * n_fft,)
+        out_b = out_b.at[indices_flat].add(updates)
+        output_list.append(out_b)
+    output = mx.stack(output_list, axis=0)  # (B, output_len)
 
     # Normalize by window sum (avoid division by zero)
     window_sum = mx.maximum(window_sum, 1e-8)
