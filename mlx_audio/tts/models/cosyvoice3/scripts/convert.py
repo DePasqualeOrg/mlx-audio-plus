@@ -724,22 +724,51 @@ def convert_from_source(
 
     save_file(all_weights, output_path / "model.safetensors")
 
-    # Copy tokenizer files (check root and CosyVoice-BlankEN subdirectory)
-    tokenizer_files = [
-        "tokenizer.json",
-        "tokenizer_config.json",
-        "vocab.json",
-        "merges.txt",
-        "special_tokens_map.json",
-    ]
+    # Generate tokenizer.json from source tokenizer files
+    # The source model may only have vocab.json + merges.txt (BPE format),
+    # so we use AutoTokenizer to load and re-save in the modern tokenizer.json format
+    logger.info("Converting tokenizer to tokenizer.json format...")
     tokenizer_subdirs = ["", "CosyVoice-BlankEN"]
-    for fname in tokenizer_files:
-        for subdir in tokenizer_subdirs:
-            src_file = source_path / subdir / fname if subdir else source_path / fname
-            if src_file.exists():
-                logger.info(f"Copying {fname} from {subdir or 'root'}")
-                shutil.copy(src_file, output_path / fname)
+    tokenizer_loaded = False
+    for subdir in tokenizer_subdirs:
+        tokenizer_path = source_path / subdir if subdir else source_path
+        # Check if tokenizer files exist in this subdirectory
+        has_tokenizer = (tokenizer_path / "tokenizer.json").exists() or (
+            (tokenizer_path / "vocab.json").exists()
+            and (tokenizer_path / "merges.txt").exists()
+        )
+        if has_tokenizer:
+            try:
+                from transformers import AutoTokenizer
+
+                logger.info(f"  Loading tokenizer from {subdir or 'root'}...")
+                tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_path))
+                tokenizer.save_pretrained(str(output_path))
+
+                # Remove unnecessary tokenizer files (keep only tokenizer.json and tokenizer_config.json)
+                unnecessary_files = [
+                    "vocab.json",
+                    "merges.txt",
+                    "added_tokens.json",
+                    "special_tokens_map.json",
+                    "chat_template.jinja",
+                ]
+                for fname in unnecessary_files:
+                    fpath = output_path / fname
+                    if fpath.exists():
+                        fpath.unlink()
+                        logger.info(f"  Removed unnecessary file: {fname}")
+
+                logger.info(f"  Saved tokenizer.json to {output_path}")
+                tokenizer_loaded = True
                 break
+            except Exception as e:
+                logger.warning(
+                    f"  Failed to load tokenizer from {subdir or 'root'}: {e}"
+                )
+
+    if not tokenizer_loaded:
+        logger.warning("No tokenizer found - text encoding will not be available")
 
     # Create config.json
     config = {
