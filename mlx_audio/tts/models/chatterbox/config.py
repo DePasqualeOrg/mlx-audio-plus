@@ -1,3 +1,6 @@
+# Copyright © Anthony DePasquale
+# Ported to MLX from https://github.com/resemble-ai/chatterbox
+
 from dataclasses import dataclass
 from typing import Any, Dict
 

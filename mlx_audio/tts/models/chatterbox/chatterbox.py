@@ -1,3 +1,6 @@
+# Copyright © Anthony DePasquale
+# Ported to MLX from https://github.com/resemble-ai/chatterbox
+
 import math
 import time
 from dataclasses import dataclass

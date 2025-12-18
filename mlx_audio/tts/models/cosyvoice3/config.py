@@ -1,3 +1,4 @@
+# Copyright © Anthony DePasquale
 # Ported to MLX from https://github.com/FunAudioLLM/CosyVoice
 
 """Configuration classes for CosyVoice3."""

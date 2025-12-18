@@ -1,4 +1,4 @@
-# Ported to MLX from https://github.com/FunAudioLLM/CosyVoice
+# Copyright © Anthony DePasquale
 
 """
 Convert CosyVoice 3 weights from PyTorch to MLX format.

@@ -1,4 +1,5 @@
-# Ported from https://github.com/resemble-ai/chatterbox
+# Copyright © Anthony DePasquale
+# Ported to MLX from https://github.com/resemble-ai/chatterbox
 
 import mlx.nn as nn
 

@@ -1,7 +1,5 @@
-# Copyright (c) 2024 Alibaba Inc
-# MLX port by mlx-audio contributors
-#
-# Licensed under the Apache License, Version 2.0
+# Copyright © Anthony DePasquale
+# Ported to MLX from https://github.com/FunAudioLLM/CosyVoice
 
 """Configuration classes for CosyVoice2."""
 

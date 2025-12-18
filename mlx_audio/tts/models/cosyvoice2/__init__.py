@@ -1,3 +1,6 @@
+# Copyright © Anthony DePasquale
+# Ported to MLX from https://github.com/FunAudioLLM/CosyVoice
+
 """CosyVoice2 TTS model for MLX."""
 
 from .config import CosyVoice2Config, FlowConfig, HiFiGANConfig, LLMConfig, ModelConfig

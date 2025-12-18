@@ -1,5 +1,5 @@
-# Ported from https://github.com/shivammehta25/Matcha-TTS
-# Original: matcha/models/components/decoder.py
+# Copyright © Anthony DePasquale
+# Ported to MLX from https://github.com/shivammehta25/Matcha-TTS
 
 import math
 

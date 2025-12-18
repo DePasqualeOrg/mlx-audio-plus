@@ -1,4 +1,5 @@
-# CosyVoice2-specific flow matching module
+# Copyright © Anthony DePasquale
+# Ported to MLX from https://github.com/FunAudioLLM/CosyVoice
 
 import math
 

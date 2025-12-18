@@ -1,5 +1,5 @@
-# Ported from https://github.com/resemble-ai/chatterbox
-# Original: chatterbox/models/s3gen/flow_matching.py
+# Copyright © Anthony DePasquale
+# Ported to MLX from https://github.com/resemble-ai/chatterbox
 
 import math
 

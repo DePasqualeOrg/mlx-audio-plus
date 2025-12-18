@@ -1,3 +1,6 @@
+# Copyright © Anthony DePasquale
+# Ported to MLX from https://github.com/modelscope/FunASR
+
 """
 Weight conversion script for Fun-ASR-Nano.
 

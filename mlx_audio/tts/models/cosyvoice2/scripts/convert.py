@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+
+# Copyright © Anthony DePasquale
+
 """
 Convert CosyVoice 2 PyTorch weights to MLX format.
 

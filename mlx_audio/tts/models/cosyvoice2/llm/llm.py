@@ -1,12 +1,5 @@
-# Copyright (c) 2024 Alibaba Inc (authors: Xiang Lyu, Zhihao Du)
-#               2025 Alibaba Inc (authors: Xiang Lyu, Yabin Li)
-# MLX port by mlx-audio contributors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Copyright © Anthony DePasquale
+# Ported to MLX from https://github.com/FunAudioLLM/CosyVoice
 
 """
 CosyVoice2 Language Model implementation for MLX.
@@ -21,7 +14,6 @@ from typing import Callable, Generator, List, Optional, Tuple, Union
 
 import mlx.core as mx
 import mlx.nn as nn
-
 from mlx_lm.models.cache import KVCache
 
 

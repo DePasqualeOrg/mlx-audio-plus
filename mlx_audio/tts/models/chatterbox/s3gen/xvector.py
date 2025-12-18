@@ -1,4 +1,6 @@
-# Ported from https://github.com/resemble-ai/chatterbox
+# Copyright © Anthony DePasquale
+# Ported to MLX from https://github.com/resemble-ai/chatterbox
+
 # Modified from 3D-Speaker (https://github.com/alibaba-damo-academy/3D-Speaker)
 
 from collections import OrderedDict

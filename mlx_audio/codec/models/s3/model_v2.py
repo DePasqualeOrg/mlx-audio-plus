@@ -1,3 +1,5 @@
+# Copyright © Anthony DePasquale
+
 import re
 from dataclasses import dataclass
 from pathlib import Path

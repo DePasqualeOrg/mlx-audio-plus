@@ -1,3 +1,6 @@
+# Copyright © Anthony DePasquale
+# Ported to MLX from https://github.com/resemble-ai/chatterbox
+
 from .decoder import ConditionalDecoder
 from .f0_predictor import ConvRNNF0Predictor
 from .flow import CausalMaskedDiffWithXvec

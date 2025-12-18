@@ -1,3 +1,5 @@
+# Copyright © Anthony DePasquale
+
 import mlx.core as mx
 
 from mlx_audio.utils import mel_filters, stft

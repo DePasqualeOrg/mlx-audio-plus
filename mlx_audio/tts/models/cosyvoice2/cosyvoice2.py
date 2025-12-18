@@ -1,8 +1,5 @@
-# Copyright (c) 2024 Alibaba Inc (authors: Xiang Lyu, Zhihao Du)
-#               2025 Alibaba Inc (authors: Xiang Lyu, Yabin Li)
-# MLX port by mlx-audio contributors
-#
-# Licensed under the Apache License, Version 2.0
+# Copyright © Anthony DePasquale
+# Ported to MLX from https://github.com/FunAudioLLM/CosyVoice
 
 """
 CosyVoice2 TTS model for MLX.

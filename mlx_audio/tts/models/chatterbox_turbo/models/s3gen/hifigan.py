@@ -1,3 +1,4 @@
+# Copyright © Anthony DePasquale
 # Copyright (c) 2025, Prince Canuma and contributors (https://github.com/Blaizzy/mlx-audio)
 
 from typing import Dict, List, Optional, Tuple

@@ -1,3 +1,5 @@
+# Copyright © Anthony DePasquale
+
 # Re-export from codec S3 implementation
 # Chatterbox uses the same S3TokenizerV2 as CosyVoice (from s3tokenizer package)
 

@@ -1,3 +1,5 @@
+# Copyright © Anthony DePasquale
+
 import unittest
 from unittest.mock import MagicMock, patch
 

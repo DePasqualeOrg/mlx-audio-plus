@@ -1,3 +1,5 @@
+# Copyright © Anthony DePasquale
+
 #!/usr/bin/env python3
 """
 Convert Chatterbox weights from PyTorch/ONNX to MLX format.
