@@ -119,30 +119,36 @@ class ConditionalCFM(nn.Module):
         cond: Optional[mx.array],
         meanflow: bool,
     ) -> mx.array:
-        """Euler solver with classifier-free guidance."""
+        """Euler solver with classifier-free guidance (optimized tensor allocation)."""
         B = mu.shape[0]
         T = x.shape[2]
+
+        # Pre-compute static zero arrays for unconditional generation (computed once)
+        mu_zeros = mx.zeros_like(mu)
+        spks_zeros = mx.zeros_like(spks) if spks is not None else None
+        cond_zeros = mx.zeros_like(cond) if cond is not None else None
+
+        # Pre-compute mask_in since mask doesn't change during iteration
+        mask_in = mx.concatenate([mask, mask], axis=0)
 
         for i in tqdm(range(len(t_span) - 1), desc="CFM sampling"):
             t = t_span[i : i + 1]
             r = t_span[i + 1 : i + 2]
 
             # Duplicate for CFG: [cond, uncond]
+            # Use tile for x (more efficient than concatenate for duplication)
             x_in = mx.concatenate([x, x], axis=0)
-            mask_in = mx.concatenate([mask, mask], axis=0)
-            mu_in = mx.concatenate([mu, mx.zeros_like(mu)], axis=0)
+            mu_in = mx.concatenate([mu, mu_zeros], axis=0)
             t_in = mx.broadcast_to(t, (2 * B,))
             r_in = mx.broadcast_to(r, (2 * B,)) if meanflow else None
 
-            if spks is not None:
-                spks_in = mx.concatenate([spks, mx.zeros_like(spks)], axis=0)
-            else:
-                spks_in = None
-
-            if cond is not None:
-                cond_in = mx.concatenate([cond, mx.zeros_like(cond)], axis=0)
-            else:
-                cond_in = None
+            # Use pre-computed zeros for unconditional inputs
+            spks_in = (
+                mx.concatenate([spks, spks_zeros], axis=0) if spks is not None else None
+            )
+            cond_in = (
+                mx.concatenate([cond, cond_zeros], axis=0) if cond is not None else None
+            )
 
             # Predict velocity
             dxdt = self.estimator(

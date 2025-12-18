@@ -480,11 +480,14 @@ class HiFTGenerator(nn.Module):
             T = x_np.shape[1]
             n_frames = 1
 
-        # Extract frames
-        frames = np.zeros((B, n_frames, n_fft), dtype=np.float32)
-        for i in range(n_frames):
-            start = i * hop_len
-            frames[:, i, :] = x_np[:, start : start + n_fft] * window_np
+        # Extract frames using strided view (vectorized, avoids Python loop)
+        # Create strided view: shape (B, n_frames, n_fft)
+        shape = (B, n_frames, n_fft)
+        strides = (x_np.strides[0], hop_len * x_np.strides[1], x_np.strides[1])
+        frames = np.lib.stride_tricks.as_strided(
+            x_np, shape=shape, strides=strides
+        ).copy()
+        frames = frames * window_np  # Apply window
 
         # Apply FFT to each frame
         spectrum = np.fft.rfft(frames, n=n_fft, axis=-1)
@@ -537,15 +540,24 @@ class HiFTGenerator(nn.Module):
         # Apply synthesis window
         frames_np = frames_np * window_np[None, None, :]
 
-        # Overlap-add synthesis using numpy (much faster than MLX loops)
+        # Overlap-add synthesis using vectorized scatter-add (avoids Python loop)
         output_length = (T - 1) * hop_len + n_fft
         audio_np = np.zeros((B, output_length), dtype=np.float32)
         window_sum = np.zeros(output_length, dtype=np.float32)
 
-        for i in range(T):
-            start = i * hop_len
-            audio_np[:, start : start + n_fft] += frames_np[:, i, :]
-            window_sum[start : start + n_fft] += window_np**2
+        # Pre-compute all output indices for each frame position
+        # indices[i, j] = i * hop_len + j, where i is frame index, j is sample within frame
+        frame_indices = (
+            np.arange(T)[:, None] * hop_len + np.arange(n_fft)[None, :]
+        )  # (T, n_fft)
+
+        # Vectorized overlap-add for each batch element
+        for b in range(B):
+            np.add.at(audio_np[b], frame_indices.ravel(), frames_np[b].ravel())
+
+        # Window sum is batch-independent, compute once using vectorized scatter
+        window_sq = window_np**2
+        np.add.at(window_sum, frame_indices.ravel(), np.tile(window_sq, T))
 
         # Normalize by window overlap
         window_sum = np.maximum(window_sum, 1e-8)

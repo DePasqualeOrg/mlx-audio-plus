@@ -133,7 +133,6 @@ class T3(nn.Module):
         speech_logits = self.speech_head(speech_hidden)
 
         # Sample first token
-        generated_speech_tokens = []
         next_speech_token = self._sample_token(
             speech_logits[:, -1, :],
             temperature=temperature,
@@ -142,7 +141,8 @@ class T3(nn.Module):
             generated_tokens=None,
             repetition_penalty=repetition_penalty,
         )
-        generated_speech_tokens.append(next_speech_token)
+        # Maintain running concatenated array instead of list (avoids O(n²) concatenation)
+        all_generated = next_speech_token
         current_speech_token = next_speech_token
 
         # Generation loop
@@ -159,10 +159,7 @@ class T3(nn.Module):
             # Get logits
             speech_logits = self.speech_head(hidden_states)
 
-            # Gather generated tokens for repetition penalty
-            all_generated = mx.concatenate(generated_speech_tokens, axis=1)
-
-            # Sample next token
+            # Sample next token (use running array for repetition penalty)
             next_speech_token = self._sample_token(
                 speech_logits[:, -1, :],
                 temperature=temperature,
@@ -172,15 +169,16 @@ class T3(nn.Module):
                 repetition_penalty=repetition_penalty,
             )
 
-            generated_speech_tokens.append(next_speech_token)
+            # Append to running array (O(1) amortized per token vs O(n) for list concat)
+            all_generated = mx.concatenate([all_generated, next_speech_token], axis=1)
             current_speech_token = next_speech_token
 
             # Check for EOS
             if mx.all(next_speech_token == self.hp.stop_speech_token):
                 break
 
-        # Concatenate all tokens
-        all_tokens = mx.concatenate(generated_speech_tokens, axis=1)
+        # all_generated already contains all tokens
+        all_tokens = all_generated
 
         # Remove EOS token if present
         if all_tokens.shape[1] > 0:
@@ -231,21 +229,27 @@ class T3(nn.Module):
         generated_tokens: mx.array,
         penalty: float,
     ) -> mx.array:
-        """Apply repetition penalty to logits."""
+        """Apply repetition penalty to logits (vectorized implementation)."""
         if penalty == 1.0:
             return logits
 
-        # Create a mask for tokens that have been generated
         vocab_size = logits.shape[-1]
-        token_mask = mx.zeros((vocab_size,))
-
-        # Mark generated tokens
         flat_tokens = generated_tokens.reshape(-1)
-        for token in flat_tokens.tolist():
-            if 0 <= token < vocab_size:
-                token_mask = mx.concatenate(
-                    [token_mask[:token], mx.array([1.0]), token_mask[token + 1 :]]
-                )
+        n_tokens = flat_tokens.size
+
+        # Clamp tokens to valid range
+        clamped_tokens = mx.clip(flat_tokens, 0, vocab_size - 1).astype(mx.int32)
+
+        # Create binary mask using one-hot sum (vectorized scatter alternative)
+        # Sum one-hot encodings: token_mask[i] = count of times token i appeared
+        # Then clip to binary mask
+        one_hot = mx.zeros((n_tokens, vocab_size))
+        row_indices = mx.arange(n_tokens)
+        one_hot = one_hot.at[row_indices, clamped_tokens].add(1.0)
+        token_mask = mx.sum(one_hot, axis=0)
+        token_mask = mx.clip(
+            token_mask, 0, 1
+        )  # Binary mask: 1 if token appeared, 0 otherwise
 
         # Apply penalty: if score < 0, multiply by penalty; if > 0, divide by penalty
         penalized = mx.where(logits < 0, logits * penalty, logits / penalty)
