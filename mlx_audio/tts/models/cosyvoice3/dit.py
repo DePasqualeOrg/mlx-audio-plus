@@ -483,32 +483,28 @@ class Attention(nn.Module):
         key = key.transpose(0, 2, 1, 3)
         value = value.transpose(0, 2, 1, 3)
 
-        # Scale query
-        scale = 1.0 / math.sqrt(self.dim_head)
-
-        # Compute attention scores
-        scores = (query @ key.transpose(0, 1, 3, 2)) * scale
-
-        # Apply attention mask
+        # Prepare attention mask for scaled_dot_product_attention
+        # Convert from boolean mask to additive mask (False -> -inf, True -> 0)
+        attn_mask = None
         if mask is not None:
             if mask.ndim == 2:
                 # (B, N) -> (B, 1, 1, N)
-                attn_mask = mx.expand_dims(mx.expand_dims(mask, 1), 1)
-                attn_mask = mx.broadcast_to(attn_mask, (B, self.heads, N, N))
-            elif mask.ndim == 4:
-                attn_mask = mask
+                input_mask = mx.expand_dims(mx.expand_dims(mask, 1), 1)
+            elif mask.ndim == 3:
+                input_mask = mx.expand_dims(mask, 1)
             else:
-                attn_mask = mx.expand_dims(mask, 1)
-                attn_mask = mx.broadcast_to(attn_mask, (B, self.heads, N, N))
+                input_mask = mask
+            # Convert boolean mask to additive mask: False -> -inf, True -> 0
+            neg_inf = mx.array(float("-inf"), dtype=query.dtype)
+            attn_mask = mx.where(
+                input_mask, mx.zeros_like(input_mask, dtype=query.dtype), neg_inf
+            )
 
-            # Apply mask: where mask is False, set to large negative value
-            # Use dtype-appropriate large negative value (matches PyTorch's -inf behavior)
-            neg_inf = mx.array(float("-inf"), dtype=scores.dtype)
-            scores = mx.where(attn_mask, scores, neg_inf)
-
-        # Softmax and apply to values
-        attn_weights = mx.softmax(scores, axis=-1)
-        out = attn_weights @ value
+        # Use optimized fused attention kernel
+        scale = 1.0 / math.sqrt(self.dim_head)
+        out = mx.fast.scaled_dot_product_attention(
+            query, key, value, scale=scale, mask=attn_mask
+        )
 
         # Reshape back
         out = out.transpose(0, 2, 1, 3).reshape(B, N, self.inner_dim)
@@ -677,18 +673,15 @@ def add_optional_chunk_mask(
         chunk_masks = mx.expand_dims(chunk_masks, 1)  # (B, 1, N)
         chunk_masks = mx.broadcast_to(chunk_masks, (B, N, N))
 
-    # Safety check: if any row is all-False, force it to True
-    # (prevents NaN from softmax on all-masked rows)
-    # Matches PyTorch: chunk_masks[chunk_masks.sum(dim=-1) == 0] = True
+    # Safety fix: if any row is all-False, force to True (prevents NaN from softmax)
+    # Use pure GPU operation to avoid CPU-GPU sync from conditional check
     row_sums = mx.sum(chunk_masks.astype(mx.float32), axis=-1, keepdims=True)
     all_false_rows = row_sums == 0
-    if mx.any(all_false_rows):
-        # Force all-False rows to all-True
-        chunk_masks = mx.where(
-            mx.broadcast_to(all_false_rows, chunk_masks.shape),
-            mx.ones_like(chunk_masks),
-            chunk_masks,
-        )
+    chunk_masks = mx.where(
+        mx.broadcast_to(all_false_rows, chunk_masks.shape),
+        mx.ones_like(chunk_masks),
+        chunk_masks,
+    )
 
     # Add head dimension: (B, N, N) -> (B, 1, N, N)
     chunk_masks = mx.expand_dims(chunk_masks, 1)

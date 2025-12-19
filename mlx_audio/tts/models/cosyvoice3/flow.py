@@ -134,6 +134,9 @@ class CosyVoice3ConditionalCFM(nn.Module):
         """
         Solve the ODE using Euler method with classifier-free guidance.
 
+        Uses batched computation for efficiency: conditional and unconditional
+        paths are batched together in a single forward pass through the estimator.
+
         Args:
             z: Initial noise (B, mel_dim, N)
             mu: Condition embedding (B, mel_dim, N)
@@ -152,11 +155,13 @@ class CosyVoice3ConditionalCFM(nn.Module):
             t_span = 1 - mx.cos(t_span * 0.5 * math.pi)
 
         x = z
+        B = mu.shape[0]
 
         # Squeeze mask for DiT
         mask_squeeze = mask.squeeze(1)  # (B, N)
 
-        # Zeros for unconditional path (mu, spks, cond all zeros - matches PyTorch CFG)
+        # Pre-allocate batched tensors for CFG (batch size 2*B)
+        # First B samples: conditional, Last B samples: unconditional
         mu_zeros = mx.zeros_like(mu)
         spks_zeros = mx.zeros_like(spks)
         cond_zeros = mx.zeros_like(cond)
@@ -165,31 +170,29 @@ class CosyVoice3ConditionalCFM(nn.Module):
             t = t_span[step - 1]
             dt = t_span[step] - t_span[step - 1]
 
-            # Expand t for batch
-            t_batch = mx.broadcast_to(t, (mu.shape[0],))
+            # Batch conditional and unconditional inputs together
+            # This matches PyTorch's efficient batched CFG computation
+            x_batched = mx.concatenate([x, x], axis=0)  # (2B, mel_dim, N)
+            mask_batched = mx.concatenate([mask_squeeze, mask_squeeze], axis=0)
+            mu_batched = mx.concatenate([mu, mu_zeros], axis=0)  # cond, then uncond
+            spks_batched = mx.concatenate([spks, spks_zeros], axis=0)
+            cond_batched = mx.concatenate([cond, cond_zeros], axis=0)
+            t_batched = mx.broadcast_to(t, (2 * B,))
 
-            # Estimate velocity with conditioning
-            dphi_dt_cond = self.estimator(
-                x=x,
-                mask=mask_squeeze,
-                mu=mu,
-                t=t_batch,
-                spks=spks,
-                cond=cond,
+            # Single batched forward pass through estimator
+            dphi_dt_batched = self.estimator(
+                x=x_batched,
+                mask=mask_batched,
+                mu=mu_batched,
+                t=t_batched,
+                spks=spks_batched,
+                cond=cond_batched,
                 streaming=streaming,
             )
 
-            # Estimate velocity without conditioning (for CFG)
-            # PyTorch zeros mu, spks, AND cond for unconditional path
-            dphi_dt_uncond = self.estimator(
-                x=x,
-                mask=mask_squeeze,
-                mu=mu_zeros,
-                t=t_batch,
-                spks=spks_zeros,
-                cond=cond_zeros,
-                streaming=streaming,
-            )
+            # Split back into conditional and unconditional
+            dphi_dt_cond = dphi_dt_batched[:B]
+            dphi_dt_uncond = dphi_dt_batched[B:]
 
             # Classifier-free guidance
             dphi_dt = (
@@ -198,6 +201,9 @@ class CosyVoice3ConditionalCFM(nn.Module):
 
             # Euler step
             x = x + dt * dphi_dt
+
+            # Force evaluation to prevent computation graph explosion
+            mx.eval(x)
 
         return x.astype(mx.float32)
 
