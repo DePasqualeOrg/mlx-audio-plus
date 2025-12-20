@@ -126,7 +126,7 @@ def convert_s3_tokenizer_v3(
     import mlx.core as mx
     from mlx.utils import tree_flatten
 
-    from mlx_audio.codec.models.s3.model_v3 import S3TokenizerV3
+    from mlx_audio.codec.models.s3tokenizer.model_v3 import S3TokenizerV3
 
     if cache_dir is None:
         cache_dir = Path.home() / ".cache" / "cosyvoice3-convert"
@@ -446,7 +446,7 @@ def convert_campplus_from_chatterbox() -> Dict[str, np.ndarray]:
     import mlx.core as mx
     from huggingface_hub import hf_hub_download
 
-    from mlx_audio.tts.models.chatterbox.s3gen.xvector import CAMPPlus
+    from mlx_audio.codec.models.s3gen.xvector import CAMPPlus
 
     logger.info("Downloading Chatterbox s3gen.safetensors for CAMPlus weights...")
     s3gen_path = hf_hub_download("ResembleAI/chatterbox", "s3gen.safetensors")

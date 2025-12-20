@@ -517,7 +517,7 @@ def convert_campplus_from_chatterbox() -> dict:
     Returns:
         Dict of converted weights ready to save as campplus.safetensors
     """
-    from mlx_audio.tts.models.chatterbox.s3gen.xvector import CAMPPlus
+    from mlx_audio.codec.models.s3gen.xvector import CAMPPlus
 
     print("   Downloading Chatterbox s3gen.safetensors...")
     s3gen_path = hf_hub_download("ResembleAI/chatterbox", "s3gen.safetensors")

@@ -1,5 +1,11 @@
 # Copyright © Anthony DePasquale
 # Copyright (c) 2025, Prince Canuma and contributors (https://github.com/Blaizzy/mlx-audio)
+#
+# Note: This is a turbo-specific CausalConditionalCFM implementation, not using
+# shared/s3gen/flow_matching.py because:
+# - Turbo uses meanflow-optimized version for distilled model (2-step generation)
+# - Shared version imports from matcha/flow_matching.py with different architecture
+# - Turbo version has simplified inference path for speed
 
 from typing import Optional, Tuple
 

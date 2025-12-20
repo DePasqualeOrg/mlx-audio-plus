@@ -316,7 +316,7 @@ def convert_s3_tokenizer(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Import S3Tokenizer for sanitize method
-    from mlx_audio.tts.models.chatterbox.s3tokenizer import S3TokenizerV2
+    from mlx_audio.codec.models.s3tokenizer import S3TokenizerV2
 
     # Download and convert S3Tokenizer from ONNX
     print("Converting S3Tokenizer...")
@@ -406,7 +406,7 @@ def convert_all(
     ckpt_dir = download_chatterbox_weights(cache_dir)
 
     # Import model components for their sanitize methods
-    from mlx_audio.tts.models.chatterbox.s3gen import S3Token2Wav
+    from mlx_audio.codec.models.s3gen import S3Token2Wav
     from mlx_audio.tts.models.chatterbox.t3 import T3
     from mlx_audio.tts.models.chatterbox.voice_encoder import VoiceEncoder
 

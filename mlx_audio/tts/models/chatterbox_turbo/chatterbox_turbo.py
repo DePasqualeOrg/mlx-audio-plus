@@ -13,10 +13,13 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
+from mlx_audio.codec.models.s3tokenizer import S3TokenizerV2
+from mlx_audio.codec.models.s3tokenizer import (
+    log_mel_spectrogram_compat as log_mel_spectrogram,
+)
 from mlx_audio.tts.models.base import GenerationResult
 
 from .models.s3gen import S3GEN_SIL, S3GEN_SR, S3Gen
-from .models.s3tokenizer import S3TokenizerV2, log_mel_spectrogram
 from .models.t3 import T3, T3Cond, T3Config
 from .models.voice_encoder import VoiceEncoder
 

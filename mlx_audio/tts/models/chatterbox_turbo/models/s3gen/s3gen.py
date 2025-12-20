@@ -1,4 +1,11 @@
 # Copyright (c) 2025, Prince Canuma and contributors (https://github.com/Blaizzy/mlx-audio)
+#
+# Note: This is a turbo-specific S3Gen implementation, not using
+# shared/s3gen/s3gen.py because:
+# - Turbo version uses meanflow=True for distilled 2-step generation
+# - No CAMPPlus speaker encoder (uses placeholder zeros for speaker embedding)
+# - Simplified architecture optimized for fast inference
+# - Different conditioning approach than full model
 
 import logging
 from typing import Dict, Optional, Tuple
@@ -117,7 +124,7 @@ class S3Token2Mel(nn.Module):
             ref_wav_24k = ref_wav_np
 
         # Extract mel features
-        ref_mels = mel_spectrogram(ref_wav_24k)
+        ref_mels = mel_spectrogram(mx.array(ref_wav_24k))
         ref_mels = ref_mels.transpose(0, 2, 1)  # (B, T, 80)
 
         # Use provided tokens or create placeholder

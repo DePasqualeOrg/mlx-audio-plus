@@ -1,5 +1,12 @@
 # Copyright © Anthony DePasquale
 # Copyright (c) 2025, Prince Canuma and contributors (https://github.com/Blaizzy/mlx-audio)
+#
+# Note: This is a turbo-specific HiFTGenerator implementation, not using
+# shared/s3gen/hifigan.py because:
+# - Different default parameters (sample_rate=24000 vs 22050, different upsample_rates)
+# - Shared version has additional parameters (lrelu_slope, audio_limit, use_interpolation)
+# - Turbo version is optimized for the distilled meanflow model
+# - ResBlock uses Conv1dPT wrapper which has different weight paths than shared version
 
 from typing import Dict, List, Optional, Tuple
 
@@ -8,10 +15,8 @@ import mlx.nn as nn
 import numpy as np
 from scipy.signal import get_window
 
-
-def get_padding(kernel_size: int, dilation: int = 1) -> int:
-    """Calculate padding for same output size."""
-    return int((kernel_size * dilation - dilation) / 2)
+# Import shared components where compatible (same weight structure)
+from mlx_audio.codec.models.s3gen.hifigan import Snake, get_padding
 
 
 class Conv1dPT(nn.Module):
@@ -71,46 +76,6 @@ class ConvTranspose1dPT(nn.Module):
         x = self.conv(x)
         # (B, T, C) -> (B, C, T)
         return x.transpose(0, 2, 1)
-
-
-class Snake(nn.Module):
-
-    def __init__(
-        self,
-        in_features: int,
-        alpha: float = 1.0,
-        alpha_trainable: bool = True,
-        alpha_logscale: bool = False,
-    ):
-        super().__init__()
-        self.in_features = in_features
-        self.alpha_logscale = alpha_logscale
-
-        if alpha_logscale:
-            self.alpha = mx.zeros(in_features) * alpha
-        else:
-            self.alpha = mx.ones(in_features) * alpha
-
-        self.no_div_by_zero = 1e-9
-
-    def __call__(self, x: mx.array) -> mx.array:
-
-        alpha = mx.reshape(self.alpha, (1, -1, 1))
-
-        if self.alpha_logscale:
-            alpha = mx.exp(alpha)
-
-        no_div_by_zero = 1e-9
-        min_alpha = 1e-4
-
-        alpha_sign = mx.sign(alpha)
-        alpha_abs = mx.abs(alpha)
-
-        alpha_clamped = alpha_sign * mx.maximum(alpha_abs, min_alpha)
-
-        alpha_clamped = mx.where(alpha_abs < no_div_by_zero, min_alpha, alpha_clamped)
-
-        return x + (1.0 / alpha_clamped) * mx.power(mx.sin(x * alpha), 2)
 
 
 class ResBlock(nn.Module):

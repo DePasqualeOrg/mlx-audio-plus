@@ -895,7 +895,7 @@ class Model(nn.Module):
 
         if self._s3_tokenizer is None:
             # Load S3 speech tokenizer V3 from mlx-community/S3TokenizerV3
-            from ....codec.models.s3.model_v3 import S3TokenizerV3
+            from mlx_audio.codec.models.s3tokenizer import S3TokenizerV3
 
             self._s3_tokenizer = S3TokenizerV3.from_pretrained()
 
@@ -990,9 +990,14 @@ class Model(nn.Module):
         import numpy as np
         from scipy.signal import resample
 
+        from mlx_audio.codec.models.s3gen.mel import (
+            mel_spectrogram as cosyvoice_mel_spectrogram,
+        )
+        from mlx_audio.codec.models.s3tokenizer import (
+            log_mel_spectrogram_compat as log_mel_spectrogram,
+        )
+
         from ..base import GenerationResult
-        from ..chatterbox.s3gen.mel import mel_spectrogram as cosyvoice_mel_spectrogram
-        from ..chatterbox.s3tokenizer import log_mel_spectrogram
 
         start_time = time.time()
 

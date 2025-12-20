@@ -748,10 +748,10 @@ def load_cosyvoice2(
     if llm_weights:
         llm.update(tree_unflatten(list(llm_weights.items())))
 
-    # Import flow components from chatterbox
-    from ..chatterbox.s3gen.decoder import ConditionalDecoder
-    from ..chatterbox.s3gen.flow import CausalMaskedDiffWithXvec
-    from ..chatterbox.s3gen.transformer import UpsampleConformerEncoder
+    # Import flow components from shared s3gen
+    from mlx_audio.codec.models.s3gen.decoder import ConditionalDecoder
+    from mlx_audio.codec.models.s3gen.flow import CausalMaskedDiffWithXvec
+    from mlx_audio.codec.models.s3gen.transformer import UpsampleConformerEncoder
 
     # Use CosyVoice2-specific flow matching (with PyTorch noise compatibility)
     from .flow_matching import CFM_PARAMS, CosyVoice2ConditionalCFM
@@ -981,7 +981,7 @@ class Model(nn.Module):
 
         if self._s3_tokenizer is None:
             # Load S3 speech tokenizer with pretrained weights
-            from ..chatterbox.s3tokenizer import S3TokenizerV2
+            from mlx_audio.codec.models.s3tokenizer import S3TokenizerV2
 
             self._s3_tokenizer = S3TokenizerV2.from_pretrained(
                 "speech_tokenizer_v2_25hz"
@@ -1079,9 +1079,14 @@ class Model(nn.Module):
         import numpy as np
         from scipy.signal import resample
 
+        from mlx_audio.codec.models.s3gen.mel import (
+            mel_spectrogram as cosyvoice2_mel_spectrogram,
+        )
+        from mlx_audio.codec.models.s3tokenizer import (
+            log_mel_spectrogram_compat as log_mel_spectrogram,
+        )
+
         from ..base import GenerationResult
-        from ..chatterbox.s3gen.mel import mel_spectrogram as cosyvoice2_mel_spectrogram
-        from ..chatterbox.s3tokenizer import log_mel_spectrogram
 
         start_time = time.time()
 

@@ -6,7 +6,7 @@ from typing import Optional
 import mlx.core as mx
 
 # Import the existing MLX CAMPlus implementation
-from ..chatterbox.s3gen.xvector import CAMPPlus, kaldi_fbank
+from mlx_audio.codec.models.s3gen.xvector import CAMPPlus, kaldi_fbank
 
 
 class CAMPlusSpeakerEncoder:

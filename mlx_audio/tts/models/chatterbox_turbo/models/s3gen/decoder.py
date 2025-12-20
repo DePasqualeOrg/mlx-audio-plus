@@ -1,4 +1,10 @@
 # Copyright (c) 2025, Prince Canuma and contributors (https://github.com/Blaizzy/mlx-audio)
+#
+# Note: This is a turbo-specific decoder implementation, not using
+# shared/s3gen/decoder.py because:
+# - Turbo version is monolithic with all components inline (Block1D, Downsample1D, etc.)
+# - Shared version imports from matcha/decoder.py which has different structure
+# - Turbo version is optimized for fast meanflow inference
 
 import math
 from typing import List, Optional

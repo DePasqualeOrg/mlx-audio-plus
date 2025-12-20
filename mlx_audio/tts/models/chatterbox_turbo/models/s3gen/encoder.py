@@ -1,4 +1,9 @@
 # Copyright (c) 2025, Prince Canuma and contributors (https://github.com/Blaizzy/mlx-audio)
+#
+# Note: This is a turbo-specific UpsampleConformerEncoder implementation.
+# The shared/s3gen/ directory uses transformer/upsample_encoder.py which has a
+# modular design importing from transformer/ submodules. This turbo version is
+# monolithic and optimized for the distilled meanflow model.
 
 from typing import Optional, Tuple
 

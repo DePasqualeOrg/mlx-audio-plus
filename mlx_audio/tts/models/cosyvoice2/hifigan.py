@@ -9,8 +9,8 @@ from typing import Dict, List
 import mlx.core as mx
 import mlx.nn as nn
 
-# Import shared components from chatterbox
-from ..chatterbox.s3gen.hifigan import (
+# Import shared components from s3gen
+from mlx_audio.codec.models.s3gen.hifigan import (
     ResBlock,
     Snake,
     hann_window_periodic,

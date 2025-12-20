@@ -6,7 +6,7 @@ import math
 import mlx.core as mx
 import mlx.nn as nn
 
-from ..chatterbox.s3gen.matcha.flow_matching import BASECFM, CFMParams
+from mlx_audio.codec.models.s3gen.matcha.flow_matching import BASECFM, CFMParams
 
 # Default CFM parameters
 CFM_PARAMS = CFMParams()

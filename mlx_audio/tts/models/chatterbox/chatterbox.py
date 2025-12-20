@@ -11,10 +11,16 @@ import mlx.core as mx
 import mlx.nn as nn
 from scipy import signal
 
+from mlx_audio.codec.models.s3gen import S3Token2Wav
+
+# Import S3 components from shared locations
+from mlx_audio.codec.models.s3tokenizer import S3TokenizerV2
+from mlx_audio.codec.models.s3tokenizer import (
+    log_mel_spectrogram_compat as log_mel_spectrogram,
+)
+
 from ..base import GenerationResult
 from .config import ModelConfig
-from .s3gen import S3Token2Wav
-from .s3tokenizer import S3TokenizerV2, log_mel_spectrogram
 from .t3 import T3
 from .t3.cond_enc import T3Cond
 from .voice_encoder import VoiceEncoder

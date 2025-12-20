@@ -497,7 +497,7 @@ class Attention(nn.Module):
             # Convert boolean mask to additive mask: False -> -inf, True -> 0
             neg_inf = mx.array(float("-inf"), dtype=query.dtype)
             attn_mask = mx.where(
-                input_mask, mx.zeros_like(input_mask, dtype=query.dtype), neg_inf
+                input_mask, mx.zeros(input_mask.shape, dtype=query.dtype), neg_inf
             )
 
         # Use optimized fused attention kernel
