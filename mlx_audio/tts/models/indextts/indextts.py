@@ -317,7 +317,7 @@ class Model(nn.Module):
         audio_duration_seconds = samples / sample_rate
 
         elapsed_time = time.perf_counter() - start_time
-        rtf = audio_duration_seconds / elapsed_time
+        rtf = elapsed_time / audio_duration_seconds if audio_duration_seconds > 0 else 0
 
         duration_mins = int(audio_duration_seconds // 60)
         duration_secs = int(audio_duration_seconds % 60)

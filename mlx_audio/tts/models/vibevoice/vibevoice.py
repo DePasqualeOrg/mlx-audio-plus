@@ -517,7 +517,7 @@ class Model(nn.Module):
         duration_ms = int((audio_duration_seconds % 1) * 1000)
         duration_str = f"{int(audio_duration_seconds // 3600):02d}:{duration_mins:02d}:{duration_secs:02d}.{duration_ms:03d}"
 
-        rtf = audio_duration_seconds / elapsed_time if elapsed_time > 0 else 0
+        rtf = elapsed_time / audio_duration_seconds if audio_duration_seconds > 0 else 0
 
         yield GenerationResult(
             audio=final_audio,
@@ -703,7 +703,7 @@ class Model(nn.Module):
         duration_ms = int((audio_duration_seconds % 1) * 1000)
         duration_str = f"{int(audio_duration_seconds // 3600):02d}:{duration_mins:02d}:{duration_secs:02d}.{duration_ms:03d}"
 
-        rtf = audio_duration_seconds / elapsed_time if elapsed_time > 0 else 0
+        rtf = elapsed_time / audio_duration_seconds if audio_duration_seconds > 0 else 0
 
         yield GenerationResult(
             audio=final_audio,

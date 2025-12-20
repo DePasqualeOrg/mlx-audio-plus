@@ -359,8 +359,8 @@ class Model(nn.Module):
                 },
                 audio_duration=duration_str,
                 real_time_factor=(
-                    audio_duration_seconds / (time_end - time_start)
-                    if (time_end - time_start) > 0
+                    (time_end - time_start) / audio_duration_seconds
+                    if audio_duration_seconds > 0
                     else 0
                 ),
                 prompt={

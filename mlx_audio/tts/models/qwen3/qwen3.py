@@ -309,7 +309,11 @@ class Model(Qwen3Model):
                 audio_duration_seconds = samples / sample_rate
 
                 # Calculate real-time factor (RTF)
-                rtf = audio_duration_seconds / (time_end - time_start)
+                rtf = (
+                    (time_end - time_start) / audio_duration_seconds
+                    if audio_duration_seconds > 0
+                    else 0
+                )
 
                 # Format duration as HH:MM:SS.mmm
                 duration_mins = int(audio_duration_seconds // 60)

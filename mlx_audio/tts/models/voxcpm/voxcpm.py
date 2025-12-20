@@ -430,7 +430,7 @@ class Model(nn.Module):
         sample_rate = self.args.audio_vae_config.sample_rate  # Use config value (44100)
         audio_duration_seconds = samples / sample_rate
 
-        rtf = audio_duration_seconds / elapsed_time if elapsed_time > 0 else 0
+        rtf = elapsed_time / audio_duration_seconds if audio_duration_seconds > 0 else 0
 
         duration_mins = int(audio_duration_seconds // 60)
         duration_secs = int(audio_duration_seconds % 60)
