@@ -442,6 +442,9 @@ class T3(nn.Module):
             # Sample next token using the sampler (handles temperature, top_p, min_p)
             next_token = sampler(logits)
 
+            mx.eval(next_token)
+            next_token_id = int(next_token[0])
+
             # Create embedding for next token BEFORE extracting ID
             # This uses the MLXArray directly, keeping computation on GPU
             next_token_embed = self.speech_emb(next_token.reshape(1, 1))
@@ -460,8 +463,7 @@ class T3(nn.Module):
                 inputs=None, input_embeddings=next_token_embed, cache=cache
             )
 
-            # Pipeline: start computing next step while current finishes
-            mx.async_eval(hidden)
+            mx.eval(hidden)
 
             # NOW extract token ID - GPU is already working on next step
             next_token_id = int(next_token[0])

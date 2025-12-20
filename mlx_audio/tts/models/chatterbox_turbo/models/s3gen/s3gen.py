@@ -20,6 +20,7 @@ from .encoder import UpsampleConformerEncoder
 from .flow_matching import CausalConditionalCFM
 from .hifigan import F0Predictor, HiFTGenerator
 from .mel import mel_spectrogram
+from .xvector import CAMPPlus
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,15 @@ class S3Token2Mel(nn.Module):
 
         # Token embedding
         self.input_embedding = nn.Embedding(SPEECH_VOCAB_SIZE, 512)
+
+        # Speaker encoder (CAMPPlus for x-vector extraction)
+        self.speaker_encoder = CAMPPlus(
+            feat_dim=80,
+            embedding_size=192,
+            growth_rate=32,
+            bn_size=4,
+            init_channels=128,
+        )
 
         # Speaker embedding projection
         self.spk_embed_affine_layer = nn.Linear(192, 80)
@@ -148,8 +158,15 @@ class S3Token2Mel(nn.Module):
 
             ref_speech_token_lens = mx.array([actual_token_len])
 
-        # Placeholder for speaker embedding (CAMPPlus not implemented in Turbo)
-        ref_x_vector = mx.zeros((1, 192))
+        # Resample to 16kHz for speaker encoder
+        if ref_sr != S3_SR:
+            ref_wav_16k = librosa.resample(ref_wav_np, orig_sr=ref_sr, target_sr=S3_SR)
+        else:
+            ref_wav_16k = ref_wav_np
+
+        # Extract speaker embedding using CAMPPlus
+        ref_x_vector = self.speaker_encoder.inference([mx.array(ref_wav_16k)])
+        mx.eval(ref_x_vector)
 
         return {
             "prompt_token": ref_speech_tokens,
@@ -339,6 +356,120 @@ class S3Token2Wav(S3Token2Mel):
             )
 
         return output_wavs, output_sources
+
+    def inference_stream(
+        self,
+        speech_tokens: mx.array,
+        ref_dict: Dict[str, mx.array],
+        n_cfm_timesteps: Optional[int] = None,
+        prev_audio_samples: int = 0,
+        is_final: bool = False,
+    ) -> Tuple[mx.array, int]:
+        """
+        Streaming inference: convert speech tokens to waveform for streaming.
+
+        This method processes accumulated tokens and returns the new audio
+        samples that weren't returned in previous chunks.
+
+        Args:
+            speech_tokens: All accumulated speech token IDs (B, T)
+            ref_dict: Pre-computed reference embeddings
+            n_cfm_timesteps: Number of CFM steps
+            prev_audio_samples: Number of audio samples already returned
+            is_final: Whether this is the final chunk
+
+        Returns:
+            new_audio: New audio samples (B, T_new)
+            total_samples: Total number of samples generated so far
+        """
+        # Default timesteps for meanflow
+        if n_cfm_timesteps is None:
+            n_cfm_timesteps = 2 if self.meanflow else 10
+
+        # Generate mel from all accumulated tokens
+        output_mels = self(
+            speech_tokens,
+            ref_dict=ref_dict,
+            n_cfm_timesteps=n_cfm_timesteps,
+            finalize=is_final,
+        )
+
+        # Vocoder
+        output_mels = output_mels.transpose(0, 2, 1)  # (B, T, 80) for HiFiGAN
+        output_wavs, _ = self.mel2wav.inference(output_mels, None)
+
+        # Apply trim fade only on first chunk
+        if prev_audio_samples == 0:
+            fade_len = len(self.trim_fade)
+            if output_wavs.shape[1] >= fade_len:
+                faded_start = output_wavs[:, :fade_len] * self.trim_fade
+                output_wavs = mx.concatenate(
+                    [faded_start, output_wavs[:, fade_len:]], axis=1
+                )
+
+        total_samples = output_wavs.shape[1]
+
+        # Return only new samples (samples after what we've already returned)
+        if prev_audio_samples > 0 and prev_audio_samples < total_samples:
+            new_audio = output_wavs[:, prev_audio_samples:]
+        elif prev_audio_samples == 0:
+            new_audio = output_wavs
+        else:
+            # No new samples
+            new_audio = output_wavs[:, :0]  # Empty with correct shape
+
+        return new_audio, total_samples
+
+    def sanitize(self, weights: dict) -> dict:
+        """
+        Sanitize PyTorch weights for MLX compatibility.
+
+        Handles:
+        - Conv weight transposition (PyTorch OIHW/OIK -> MLX OHWI/OKI)
+        - BatchNorm running stats
+        - CAMPPlus speaker encoder weights
+        """
+        new_weights = {}
+
+        for key, value in weights.items():
+            new_key = key
+
+            # Skip num_batches_tracked
+            if "num_batches_tracked" in key:
+                continue
+
+            # Handle speaker_encoder (CAMPPlus) weights
+            if key.startswith("speaker_encoder."):
+                # Use CAMPPlus sanitize
+                spk_key = key.replace("speaker_encoder.", "")
+                spk_weights = self.speaker_encoder.sanitize({spk_key: value})
+                for sk, sv in spk_weights.items():
+                    new_weights[f"speaker_encoder.{sk}"] = sv
+                continue
+
+            # Handle Conv weight transposition
+            # Skip if weights are already in MLX format (from pre-converted models)
+            if "weight" in key and value.ndim >= 3:
+                if value.ndim == 4:
+                    # Conv2d: (O, I, H, W) -> (O, H, W, I)
+                    # PyTorch format: shape[2] == shape[3] (square kernel like 3x3, 1x1)
+                    if value.shape[2] == value.shape[3]:
+                        # PyTorch format (O, I, H, W) with H==W: transpose
+                        value = mx.array(np.array(value).transpose(0, 2, 3, 1))
+                    # else: already in MLX format, skip transpose
+                elif value.ndim == 3:
+                    # Conv1d: (O, I, K) -> (O, K, I)
+                    # For pre-converted MLX models, Conv1d weights are already transposed.
+                    # PyTorch format has kernel at end: (O, I, K) where K is typically small (1-7)
+                    # Only transpose if last dim is a typical small kernel size (1-7)
+                    if value.shape[2] <= 7 and value.shape[1] > value.shape[2]:
+                        # PyTorch format with small kernel at end: transpose
+                        value = mx.array(np.array(value).transpose(0, 2, 1))
+                    # else: already in MLX format or ambiguous, skip transpose
+
+            new_weights[new_key] = value
+
+        return new_weights
 
 
 # Alias for compatibility
