@@ -441,18 +441,10 @@ class T3(nn.Module):
 
             # Sample next token using the sampler (handles temperature, top_p, min_p)
             next_token = sampler(logits)
-            # Sampler returns 1D array (B,) for each batch item
-            next_token_id = int(next_token[0])
 
-            # Check for EOS
-            if next_token_id == self.hp.stop_speech_token:
-                generated_ids.append(next_token_id)
-                break
-
-            generated_ids.append(next_token_id)
-
-            # Create embedding for next token with position embedding
-            next_token_embed = self.speech_emb(mx.array([[next_token_id]]))
+            # Create embedding for next token BEFORE extracting ID
+            # This uses the MLXArray directly, keeping computation on GPU
+            next_token_embed = self.speech_emb(next_token.reshape(1, 1))
             next_token_embed = (
                 next_token_embed + self.speech_pos_emb.get_fixed_embedding(step + 1)
             )
@@ -470,5 +462,15 @@ class T3(nn.Module):
 
             # Pipeline: start computing next step while current finishes
             mx.async_eval(hidden)
+
+            # NOW extract token ID - GPU is already working on next step
+            next_token_id = int(next_token[0])
+
+            # Check for EOS
+            if next_token_id == self.hp.stop_speech_token:
+                generated_ids.append(next_token_id)
+                break
+
+            generated_ids.append(next_token_id)
 
         return mx.array([generated_ids])

@@ -491,6 +491,9 @@ class Model(nn.Module):
                 cross_attention_cache=decoder_cross_attention_cache,
             )
 
+            # Pipeline: evaluate async while preparing next iteration
+            mx.async_eval(logits_Bx1xCxV)
+
             V = self.config.model.tgt_vocab_size
             logits_last_BxCxV = logits_Bx1xCxV[:, -1, :, :]  # B, C, V
             uncond_logits_CxV = logits_last_BxCxV[0, :, :]

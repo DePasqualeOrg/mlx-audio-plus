@@ -378,9 +378,11 @@ class Model(nn.Module):
 
         mel_position = 0
 
-        for _ in range(max_tokens) if not verbose else tqdm.trange(max_tokens):
-            hidden_states = self.gpt(inputs, cache=cache)
+        # Compute first step (prefill)
+        hidden_states = self.gpt(inputs, cache=cache)
+        mx.async_eval(hidden_states)
 
+        for _ in range(max_tokens) if not verbose else tqdm.trange(max_tokens):
             hidden_states = self.final_norm(hidden_states)
 
             latent_states.append(hidden_states[:, -1:, :])
@@ -388,16 +390,23 @@ class Model(nn.Module):
 
             next_token = sampler(mel_logits)
 
-            if next_token.item() == self.args.gpt.stop_mel_token:
-                break
-
-            generated_tokens.append(next_token.item())
-
+            # Prepare next input and start computing ahead (before extracting token ID)
             mel_emb = self.mel_embedding(next_token) + self.mel_pos_embedding(
                 next_token, embedding.shape[1] + mel_position
             )
-
             inputs = mel_emb
+            hidden_states = self.gpt(inputs, cache=cache)
+
+            # Pipeline: evaluate async while preparing next iteration
+            mx.async_eval(hidden_states)
+
+            # NOW extract token ID - GPU is already computing next step
+            next_token_id = next_token.item()
+
+            if next_token_id == self.args.gpt.stop_mel_token:
+                break
+
+            generated_tokens.append(next_token_id)
             mel_position += 1
 
         latent_states = mx.concat(latent_states, axis=-2)

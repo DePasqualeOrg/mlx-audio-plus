@@ -286,6 +286,9 @@ class CosyVoice3LM(nn.Module):
             # Forward one step
             y_pred, cache = self.llm.forward_one_step(lm_input, cache=cache)
 
+            # Pipeline: evaluate async while preparing next iteration
+            mx.async_eval(y_pred, cache)
+
             # Get logits for last position
             logits = self.llm_decoder(y_pred[:, -1, :])
             logp = mx.log(mx.softmax(logits, axis=-1))

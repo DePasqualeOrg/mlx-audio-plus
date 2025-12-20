@@ -527,16 +527,29 @@ class Model(nn.Module):
         # Initialize cache
         cache = None
 
+        # Compute first step (prefill)
+        logits, cache = self.llm(
+            input_embeddings=input_embeddings,
+            cache=cache,
+        )
+        mx.async_eval(logits, cache)
+
         # Generate tokens
         for _ in range(max_tokens):
-            # Forward pass
+            # Sample current token
+            token = self._sample_next_token(logits, temperature, top_p, top_k)
+
+            # Prepare next input and start computing ahead (before extracting token ID)
+            input_embeddings = self.llm.get_input_embeddings()(token.reshape(1, 1))
             logits, cache = self.llm(
                 input_embeddings=input_embeddings,
                 cache=cache,
             )
 
-            # Sample next token
-            token = self._sample_next_token(logits, temperature, top_p, top_k)
+            # Pipeline: evaluate async while preparing next iteration
+            mx.async_eval(logits, cache)
+
+            # NOW extract token ID - GPU is already computing next step
             token_id = token.item()
 
             # Check for EOS
@@ -544,9 +557,6 @@ class Model(nn.Module):
                 break
 
             yield token_id, logits
-
-            # Prepare next input (just the new token embedding)
-            input_embeddings = self.llm.get_input_embeddings()(token[None, :])
 
     def generate(
         self,
