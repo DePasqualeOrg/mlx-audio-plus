@@ -1,5 +1,7 @@
-# Copyright © Anthony DePasquale
+# Copyright © 2025 FunASR (original model implementation)
+# Copyright © Anthony DePasquale (MLX port)
 # Ported to MLX from https://github.com/modelscope/FunASR
+# License: licenses/funasr.txt
 
 """
 Fun-ASR model for MLX.

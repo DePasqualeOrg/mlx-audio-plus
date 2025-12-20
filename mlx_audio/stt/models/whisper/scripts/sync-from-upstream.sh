@@ -1,5 +1,7 @@
 #!/bin/bash
 #
+# Copyright © Anthony DePasquale
+#
 # Sync Whisper core files from official mlx-examples repository
 #
 # This script syncs the following files from ml-explore/mlx-examples:
