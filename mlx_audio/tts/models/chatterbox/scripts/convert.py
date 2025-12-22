@@ -2,37 +2,31 @@
 
 #!/usr/bin/env python3
 """
-Convert Chatterbox weights from PyTorch/ONNX to MLX format.
+Convert Chatterbox weights from PyTorch to MLX format.
 
 This script downloads the original weights and converts them to MLX-compatible
 safetensors format. It uses the model's own sanitize() methods to ensure
 consistency between conversion and runtime loading.
 
-The S3Tokenizer is converted separately and uploaded to its own repo, as it's
-shared between multiple TTS models (Chatterbox, CosyVoice 2, etc.).
+The S3Tokenizer is converted separately using the standalone script at
+mlx_audio/codec/models/s3tokenizer/scripts/convert_v2.py, as it's shared
+between multiple TTS models (Chatterbox, Chatterbox Turbo, CosyVoice 2).
 
 Usage:
-    # Convert Chatterbox (without S3Tokenizer) to fp16
+    # Convert Chatterbox to fp16
     python scripts/convert.py
 
     # Convert to 4-bit quantized
     python scripts/convert.py --quantize
 
-    # Convert S3Tokenizer only (shared component)
-    python scripts/convert.py --s3-tokenizer-only
-
     # Upload Chatterbox to Hugging Face
     python scripts/convert.py --quantize --upload-repo
 
-    # Upload S3Tokenizer to Hugging Face
-    python scripts/convert.py --s3-tokenizer-only --upload-repo
-
     # Custom repos
     python scripts/convert.py --upload-repo my-org/my-chatterbox
-    python scripts/convert.py --s3-tokenizer-only --upload-repo my-org/my-s3tokenizer
 
 Requirements (for conversion only):
-    pip install torch safetensors huggingface_hub onnx s3tokenizer
+    pip install torch safetensors huggingface_hub
 
 After conversion, the model only needs:
     pip install mlx mlx-lm
@@ -45,8 +39,13 @@ from typing import Dict
 import numpy as np
 
 
-def download_chatterbox_weights(cache_dir: Path) -> Path:
-    """Download Chatterbox weights from Hugging Face."""
+def download_chatterbox_weights(cache_dir: Path = None) -> Path:
+    """Download Chatterbox weights from Hugging Face.
+
+    Args:
+        cache_dir: Optional custom cache directory. If None, uses the default
+            HF cache (~/.cache/huggingface/hub).
+    """
     from huggingface_hub import snapshot_download
 
     print("Downloading Chatterbox weights from Hugging Face...")
@@ -66,20 +65,6 @@ def download_chatterbox_weights(cache_dir: Path) -> Path:
     return ckpt_dir
 
 
-def download_s3tokenizer_onnx(cache_dir: Path) -> Path:
-    """Download S3Tokenizer ONNX weights from Hugging Face."""
-    from huggingface_hub import hf_hub_download
-
-    print("Downloading S3Tokenizer ONNX from Hugging Face...")
-    onnx_path = hf_hub_download(
-        repo_id="FunAudioLLM/CosyVoice2-0.5B",
-        filename="speech_tokenizer_v2.onnx",
-        cache_dir=cache_dir,
-    )
-    print(f"Downloaded to: {onnx_path}")
-    return Path(onnx_path)
-
-
 def load_pytorch_safetensors(path: Path) -> Dict[str, np.ndarray]:
     """Load PyTorch safetensors and convert to numpy."""
     import torch
@@ -87,41 +72,6 @@ def load_pytorch_safetensors(path: Path) -> Dict[str, np.ndarray]:
 
     state_dict = load_file(path)
     return {k: v.cpu().numpy() for k, v in state_dict.items()}
-
-
-def load_onnx_weights(path: Path) -> Dict[str, np.ndarray]:
-    """Load ONNX weights as numpy arrays using s3tokenizer's onnx2torch."""
-    try:
-        # Use s3tokenizer's conversion utility for proper key naming
-        import torch
-        from s3tokenizer.utils import onnx2torch
-
-        pytorch_weights = onnx2torch(str(path), None, False)
-
-        # Convert PyTorch tensors to numpy arrays
-        weights = {}
-        for key, value in pytorch_weights.items():
-            if isinstance(value, torch.Tensor):
-                weights[key] = value.cpu().numpy()
-            else:
-                weights[key] = np.array(value)
-
-        return weights
-
-    except ImportError:
-        # Fallback: direct ONNX parsing (gives onnx:: internal names)
-        print("WARNING: s3tokenizer not installed, using raw ONNX parsing")
-        print("         This may result in incorrect weight names")
-        import onnx
-        from onnx import numpy_helper
-
-        model = onnx.load(str(path))
-        weights = {}
-
-        for initializer in model.graph.initializer:
-            weights[initializer.name] = numpy_helper.to_array(initializer)
-
-        return weights
 
 
 def numpy_to_mlx(weights: Dict[str, np.ndarray]) -> Dict:
@@ -252,29 +202,6 @@ generate_audio(
     print(f"Created: {card_path}")
 
 
-def generate_s3_tokenizer_readme(path: Path, upload_repo: str):
-    """Generate README.md model card for S3Tokenizer on Hugging Face."""
-    card_text = f"""---
-library_name: mlx-audio-plus
-base_model:
-- FunAudioLLM/CosyVoice2-0.5B
-tags:
-- mlx
-- speech-tokenizer
----
-
-# {upload_repo}
-
-S3TokenizerV2 (Supervised Semantic Speech Tokenizer) converted to MLX format from [FunAudioLLM/CosyVoice2-0.5B](https://huggingface.co/FunAudioLLM/CosyVoice2-0.5B).
-
-This tokenizer is automatically downloaded when using Chatterbox or CosyVoice 2 with [mlx-audio-plus](https://github.com/DePasqualeOrg/mlx-audio-plus).
-"""
-    card_path = path / "README.md"
-    with open(card_path, "w") as f:
-        f.write(card_text)
-    print(f"Created: {card_path}")
-
-
 def upload_to_hub(path: Path, upload_repo: str):
     """Upload converted model to Hugging Face Hub."""
     from huggingface_hub import HfApi
@@ -288,79 +215,6 @@ def upload_to_hub(path: Path, upload_repo: str):
         repo_type="model",
     )
     print(f"Upload successful! Visit https://huggingface.co/{upload_repo}")
-
-
-def convert_s3_tokenizer(
-    output_dir: Path,
-    cache_dir: Path = None,
-    upload_repo: str = None,
-    dry_run: bool = False,
-):
-    """
-    Convert S3Tokenizer weights to MLX format (standalone).
-
-    This creates a separate repo for the S3Tokenizer, which is shared between
-    multiple TTS models (Chatterbox, CosyVoice 2, etc.).
-
-    Args:
-        output_dir: Directory to save converted weights
-        cache_dir: Directory to cache downloaded weights
-        upload_repo: Optional Hugging Face repo to upload to
-        dry_run: If True, generate all files including README but skip upload
-    """
-    import json
-
-    if cache_dir is None:
-        cache_dir = Path.home() / ".cache" / "chatterbox-convert"
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Import S3Tokenizer for sanitize method
-    from mlx_audio.codec.models.s3tokenizer import S3TokenizerV2
-
-    # Download and convert S3Tokenizer from ONNX
-    print("Converting S3Tokenizer...")
-    onnx_path = download_s3tokenizer_onnx(cache_dir)
-    s3tok_weights = load_onnx_weights(onnx_path)
-    s3tok_weights_mx = numpy_to_mlx(s3tok_weights)
-    s3tok = S3TokenizerV2("speech_tokenizer_v2_25hz")
-    s3tok_weights_mx = s3tok.sanitize(s3tok_weights_mx)
-    s3tok_weights = mlx_to_numpy(s3tok_weights_mx)
-    print(f"  Converted {len(s3tok_weights)} S3Tokenizer weights")
-
-    # Save weights (no quantization for tokenizer)
-    print("\nSaving model.safetensors...")
-    save_mlx_safetensors(s3tok_weights, output_dir / "model.safetensors")
-
-    # Create config.json
-    print("Creating config.json...")
-    config = {
-        "model_type": "s3_tokenizer_v2",
-        "version": "2.0",
-        "sample_rate": 16000,
-        "token_rate": 25,
-        "codebook_size": 6561,
-    }
-    with open(output_dir / "config.json", "w") as f:
-        json.dump(config, f, indent=2)
-
-    # Generate README if upload_repo is specified
-    if upload_repo:
-        print("Generating README.md...")
-        generate_s3_tokenizer_readme(output_dir, upload_repo)
-
-    print(f"\n✅ S3Tokenizer conversion complete! Output directory: {output_dir}")
-    print(f"\nTotal weights: {len(s3tok_weights)}")
-    print("\nFiles created:")
-    for f in sorted(output_dir.iterdir()):
-        size_mb = f.stat().st_size / (1024 * 1024)
-        print(f"  {f.name}: {size_mb:.1f} MB")
-
-    # Upload to Hugging Face if requested (and not dry run)
-    if upload_repo and not dry_run:
-        upload_to_hub(output_dir, upload_repo)
-    elif upload_repo:
-        print(f"\n📁 Dry run - to upload to {upload_repo}, run without --dry-run")
 
 
 def convert_all(
@@ -384,7 +238,7 @@ def convert_all(
 
     Args:
         output_dir: Directory to save converted weights
-        cache_dir: Directory to cache downloaded weights
+        cache_dir: Optional custom cache directory for downloads
         upload_repo: Optional Hugging Face repo to upload to (e.g., "mlx-community/Chatterbox-TTS-fp16")
         quantize: Whether to apply selective quantization to T3 backbone
         bits: Quantization bits (default: 4)
@@ -396,9 +250,6 @@ def convert_all(
 
     import mlx.core as mx
     from mlx.utils import tree_flatten
-
-    if cache_dir is None:
-        cache_dir = Path.home() / ".cache" / "chatterbox-convert"
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -589,7 +440,6 @@ def convert_from_source(
     # Call the existing convert_all function
     convert_all(
         output_dir=output_dir,
-        cache_dir=None,  # Use default cache
         upload_repo=upload_repo if not dry_run else None,
         quantize=quantize,
         bits=q_bits,
@@ -606,10 +456,13 @@ def main():
         "--output-dir",
         type=Path,
         default=None,
-        help="Output directory for MLX weights (default: ./Chatterbox-TTS-{fp16|Nbit} or ./S3TokenizerV2)",
+        help="Output directory for MLX weights (default: ./Chatterbox-TTS-{fp16|Nbit})",
     )
     parser.add_argument(
-        "--cache-dir", type=Path, default=None, help="Cache directory for downloads"
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Cache directory for downloads (default: ~/.cache/huggingface/hub)",
     )
     parser.add_argument(
         "--upload-repo",
@@ -641,42 +494,24 @@ def main():
         default=64,
         help="Quantization group size (default: 64)",
     )
-    parser.add_argument(
-        "--s3-tokenizer-only",
-        action="store_true",
-        help="Only convert S3Tokenizer (shared component for multiple TTS models)",
-    )
     args = parser.parse_args()
 
     # Determine if we should upload (--upload-repo provided and not --dry-run)
     should_upload = args.upload_repo is not None and not args.dry_run
 
-    if args.s3_tokenizer_only:
-        # S3Tokenizer conversion mode
-        output_dir = args.output_dir or Path("./S3TokenizerV2")
-        upload_repo = args.upload_repo or f"mlx-community/{output_dir.name}"
+    precision_suffix = f"{args.q_bits}bit" if args.quantize else "fp16"
+    output_dir = args.output_dir or Path(f"./Chatterbox-TTS-{precision_suffix}")
+    upload_repo = args.upload_repo or f"mlx-community/{output_dir.name}"
 
-        convert_s3_tokenizer(
-            output_dir=output_dir,
-            cache_dir=args.cache_dir,
-            upload_repo=upload_repo,
-            dry_run=not should_upload,
-        )
-    else:
-        # Chatterbox conversion mode
-        precision_suffix = f"{args.q_bits}bit" if args.quantize else "fp16"
-        output_dir = args.output_dir or Path(f"./Chatterbox-TTS-{precision_suffix}")
-        upload_repo = args.upload_repo or f"mlx-community/{output_dir.name}"
-
-        convert_all(
-            output_dir=output_dir,
-            cache_dir=args.cache_dir,
-            upload_repo=upload_repo,
-            quantize=args.quantize,
-            bits=args.q_bits,
-            group_size=args.q_group_size,
-            dry_run=not should_upload,
-        )
+    convert_all(
+        output_dir=output_dir,
+        cache_dir=args.cache_dir,
+        upload_repo=upload_repo,
+        quantize=args.quantize,
+        bits=args.q_bits,
+        group_size=args.q_group_size,
+        dry_run=not should_upload,
+    )
 
 
 if __name__ == "__main__":

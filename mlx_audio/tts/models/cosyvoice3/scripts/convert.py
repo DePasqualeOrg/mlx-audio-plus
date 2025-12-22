@@ -10,8 +10,8 @@ All weights are combined into a single model.safetensors file with prefixes:
 - hifigan.* : HiFi-GAN vocoder
 - campplus.* : Speaker encoder
 
-The S3TokenizerV3 is converted separately and uploaded to its own repo, as it may
-be shared between multiple TTS models in the future.
+The S3TokenizerV3 is converted separately using the standalone script at
+mlx_audio/codec/models/s3tokenizer/scripts/convert_v3.py.
 
 Quantization:
 - Only Qwen2 transformer layers (qwen2.model.layers.*) are quantized
@@ -32,14 +32,6 @@ Usage:
     python -m mlx_audio.tts.models.cosyvoice3.scripts.convert \\
         --upload-repo mlx-community/CosyVoice3-0.5B-fp16
 
-    # Convert S3TokenizerV3 only (shared component)
-    python -m mlx_audio.tts.models.cosyvoice3.scripts.convert \\
-        --s3-tokenizer-only
-
-    # Upload S3TokenizerV3 to Hugging Face
-    python -m mlx_audio.tts.models.cosyvoice3.scripts.convert \\
-        --s3-tokenizer-only --upload-repo mlx-community/S3TokenizerV3
-
 Downloads weights from FunAudioLLM/Fun-CosyVoice3-0.5B-2512 by default
 """
 
@@ -57,147 +49,6 @@ from huggingface_hub import snapshot_download
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_ID = "FunAudioLLM/Fun-CosyVoice3-0.5B-2512"
-
-
-# =============================================================================
-# S3TokenizerV3 Conversion Functions
-# =============================================================================
-
-
-def download_s3tokenizer_v3_onnx(cache_dir: Path) -> Path:
-    """Download S3TokenizerV3 ONNX weights from Hugging Face."""
-    from huggingface_hub import hf_hub_download
-
-    logger.info("Downloading S3TokenizerV3 ONNX from Hugging Face...")
-    onnx_path = hf_hub_download(
-        repo_id="FunAudioLLM/Fun-CosyVoice3-0.5B-2512",
-        filename="speech_tokenizer_v3.onnx",
-        cache_dir=cache_dir,
-    )
-    logger.info(f"Downloaded to: {onnx_path}")
-    return Path(onnx_path)
-
-
-def generate_s3_tokenizer_v3_readme(path: Path, upload_repo: str):
-    """Generate README.md model card for S3TokenizerV3 on Hugging Face."""
-    from mlx_audio.version import __version__
-
-    card_text = f"""---
-library_name: mlx-audio-plus
-base_model:
-- FunAudioLLM/Fun-CosyVoice3-0.5B-2512
-tags:
-- mlx
-- speech-tokenizer
----
-
-# {upload_repo}
-
-S3TokenizerV3 (Supervised Semantic Speech Tokenizer) converted to MLX format from [FunAudioLLM/Fun-CosyVoice3-0.5B-2512](https://huggingface.co/FunAudioLLM/Fun-CosyVoice3-0.5B-2512).
-
-This tokenizer is automatically downloaded when using CosyVoice 3 with [mlx-audio-plus](https://github.com/DePasqualeOrg/mlx-audio-plus) version **{__version__}**.
-"""
-    card_path = path / "README.md"
-    with open(card_path, "w") as f:
-        f.write(card_text)
-    logger.info(f"Created: {card_path}")
-
-
-def convert_s3_tokenizer_v3(
-    output_dir: Path,
-    source_path: Path = None,
-    cache_dir: Path = None,
-    upload_repo: str = None,
-    dry_run: bool = False,
-):
-    """
-    Convert S3TokenizerV3 weights to MLX format (standalone).
-
-    This creates a separate repo for the S3TokenizerV3, which may be shared
-    between multiple TTS models in the future.
-
-    Args:
-        output_dir: Directory to save converted weights
-        source_path: Path to local speech_tokenizer_v3.onnx (optional)
-        cache_dir: Directory to cache downloaded weights
-        upload_repo: Hugging Face repo to upload to (optional)
-        dry_run: Generate files but skip upload
-    """
-    import mlx.core as mx
-    from mlx.utils import tree_flatten
-
-    from mlx_audio.codec.models.s3tokenizer.model_v3 import S3TokenizerV3
-
-    if cache_dir is None:
-        cache_dir = Path.home() / ".cache" / "cosyvoice3-convert"
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Find ONNX file
-    if source_path and (source_path / "speech_tokenizer_v3.onnx").exists():
-        onnx_path = source_path / "speech_tokenizer_v3.onnx"
-        logger.info(f"Using local ONNX: {onnx_path}")
-    elif source_path and source_path.suffix == ".onnx":
-        onnx_path = source_path
-        logger.info(f"Using provided ONNX: {onnx_path}")
-    else:
-        onnx_path = download_s3tokenizer_v3_onnx(cache_dir)
-
-    # Convert using the model's from_onnx method
-    logger.info("Converting S3TokenizerV3 from ONNX...")
-    model = S3TokenizerV3.from_onnx(str(onnx_path))
-
-    # Extract weights
-    weights = dict(tree_flatten(model.parameters()))
-    logger.info(f"  Converted {len(weights)} weights")
-
-    # Save as safetensors
-    logger.info("Saving model.safetensors...")
-    mx.save_safetensors(str(output_dir / "model.safetensors"), weights)
-
-    # Create config.json
-    config = {
-        "model_type": "s3_tokenizer_v3",
-        "n_mels": 128,
-        "n_audio_ctx": 1500,
-        "n_audio_state": 1280,
-        "n_audio_head": 20,
-        "n_audio_layer": 12,
-        "n_codebook_size": 6561,
-    }
-    with open(output_dir / "config.json", "w") as f:
-        json.dump(config, f, indent=2)
-
-    # Generate README if upload_repo is specified
-    if upload_repo:
-        logger.info("Generating README.md...")
-        generate_s3_tokenizer_v3_readme(output_dir, upload_repo)
-
-    logger.info(f"\n✅ S3TokenizerV3 conversion complete! Output: {output_dir}")
-    logger.info("\nFiles created:")
-    for f in sorted(output_dir.iterdir()):
-        if f.is_file():
-            size_mb = f.stat().st_size / (1024 * 1024)
-            logger.info(f"  {f.name}: {size_mb:.1f} MB")
-
-    # Upload if requested
-    if upload_repo and not dry_run:
-        from huggingface_hub import HfApi
-
-        logger.info(f"\nUploading to {upload_repo}...")
-        api = HfApi()
-        api.create_repo(repo_id=upload_repo, exist_ok=True)
-        api.upload_folder(
-            folder_path=str(output_dir), repo_id=upload_repo, repo_type="model"
-        )
-        logger.info(f"Upload successful! Visit https://huggingface.co/{upload_repo}")
-    elif upload_repo and dry_run:
-        logger.info(f"\n📁 Dry run - to upload to {upload_repo}, run without --dry-run")
-
-
-# =============================================================================
-# CosyVoice 3 Model Conversion Functions
-# =============================================================================
 
 
 def transpose_conv_weight(weight: np.ndarray, transpose: bool = False) -> np.ndarray:
@@ -868,13 +719,13 @@ def main():
         "--output-dir",
         type=str,
         default=None,
-        help="Output directory for MLX weights (default: ./CosyVoice3-0.5B-fp16 or ./S3TokenizerV3)",
+        help="Output directory for MLX weights (default: ./CosyVoice3-0.5B-{fp16|Nbit})",
     )
     parser.add_argument(
         "--cache-dir",
         type=Path,
         default=None,
-        help="Cache directory for downloads",
+        help="Cache directory for downloads (default: ~/.cache/huggingface/hub)",
     )
     parser.add_argument(
         "--upload-repo",
@@ -913,57 +764,29 @@ def main():
         choices=["float16", "float32"],
         help="Data type for weights (default: float16)",
     )
-    parser.add_argument(
-        "--s3-tokenizer-only",
-        action="store_true",
-        help="Only convert S3TokenizerV3 (shared component for CosyVoice 3)",
-    )
 
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    if args.s3_tokenizer_only:
-        # S3TokenizerV3 conversion mode
-        output_dir = (
-            Path(args.output_dir) if args.output_dir else Path("./S3TokenizerV3")
-        )
-        upload_repo = args.upload_repo or f"mlx-community/{output_dir.name}"
-
-        # Use model_id as source path if it's a local directory
-        source_path = None
-        if args.model_id != DEFAULT_MODEL_ID:
-            model_path = Path(args.model_id)
-            if model_path.exists() and model_path.is_dir():
-                source_path = model_path
-
-        convert_s3_tokenizer_v3(
-            output_dir=output_dir,
-            source_path=source_path,
-            cache_dir=args.cache_dir,
-            upload_repo=upload_repo,
-            dry_run=args.dry_run,
-        )
+    # Determine output directory
+    if args.output_dir:
+        output_dir = args.output_dir
     else:
-        # Full CosyVoice 3 conversion mode
-        # Determine output directory
-        if args.output_dir:
-            output_dir = args.output_dir
-        else:
-            suffix = "fp16" if args.dtype == "float16" else args.dtype
-            if args.quantize:
-                suffix = f"{args.q_bits}bit"
-            output_dir = f"./CosyVoice3-0.5B-{suffix}"
+        suffix = "fp16" if args.dtype == "float16" else args.dtype
+        if args.quantize:
+            suffix = f"{args.q_bits}bit"
+        output_dir = f"./CosyVoice3-0.5B-{suffix}"
 
-        convert_from_source(
-            model_id=args.model_id,
-            output_path=output_dir,
-            dtype=args.dtype,
-            quantize=args.quantize,
-            q_bits=args.q_bits,
-            q_group_size=args.q_group_size,
-            upload_repo=args.upload_repo,
-            dry_run=args.dry_run,
-        )
+    convert_from_source(
+        model_id=args.model_id,
+        output_path=output_dir,
+        dtype=args.dtype,
+        quantize=args.quantize,
+        q_bits=args.q_bits,
+        q_group_size=args.q_group_size,
+        upload_repo=args.upload_repo,
+        dry_run=args.dry_run,
+    )
 
 
 if __name__ == "__main__":
