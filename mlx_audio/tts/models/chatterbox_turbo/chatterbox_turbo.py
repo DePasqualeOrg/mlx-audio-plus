@@ -114,7 +114,6 @@ class ChatterboxTurboTTS(nn.Module):
         ve: VoiceEncoder = None,
         tokenizer=None,  # HuggingFace tokenizer
         s3tokenizer: S3TokenizerV2 = None,  # Speech tokenizer for conditioning
-        conds: Optional[Conditionals] = None,
         local_path: Optional[str] = None,
     ):
         super().__init__()
@@ -138,7 +137,7 @@ class ChatterboxTurboTTS(nn.Module):
         self.tokenizer = tokenizer
         # S3 speech tokenizer for reference audio tokenization
         self._s3tokenizer = s3tokenizer or S3TokenizerV2("speech_tokenizer_v2_25hz")
-        self.conds = conds
+        self._conds = None  # Runtime conditionals set by prepare_conditionals()
         self.local_path = local_path
 
     @property
@@ -582,7 +581,10 @@ class ChatterboxTurboTTS(nn.Module):
             except Exception as e:
                 logger.warning(f"Could not load conditionals: {e}")
 
-        return cls(t3, s3gen, ve, tokenizer, conds=conds, local_path=str(ckpt_dir))
+        model = cls(t3, s3gen, ve, tokenizer, local_path=str(ckpt_dir))
+        if conds is not None:
+            model._conds = conds
+        return model
 
     @classmethod
     def from_pretrained(
