@@ -3,13 +3,14 @@ requires = ["setuptools>=61.0", "wheel", "setuptools-scm>=8.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mlx-audio"
+name = "mlx-audio-plus"
 dynamic = ["version"]
-description = "MLX-Audio is a package for inference of text-to-speech (TTS) and speech-to-speech (STS) models locally on your Mac using MLX"
+description = "Python tools for text to speech (TTS), speech to text (STT), and speech to speech (STS) powered by MLX"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [
-    {name = "Prince Canuma", email = "prince.gdt@gmail.com"}
+    {name = "Anthony DePasquale", email = "anthony@depasquale.org"},
+    {name = "Prince Canuma", email = "prince.gdt@gmail.com"},
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -62,7 +63,7 @@ server = [
 
 # STS (Speech-to-Speech) requires both STT and TTS + additional deps
 sts = [
-    "mlx-audio[stt,tts]",
+    "mlx-audio-plus[stt,tts]",
     "mlx-vlm>=0.1.27",
     "fastrtc[vad,stt]",
     "webrtcvad>=2.0.10",
@@ -70,7 +71,7 @@ sts = [
 
 # Full installation (all features)
 all = [
-    "mlx-audio[stt,tts,sts,server]",
+    "mlx-audio-plus[stt,tts,sts,server]",
 ]
 
 # Development dependencies
@@ -86,8 +87,8 @@ dev = [
 "mlx_audio.server" = "mlx_audio.server:main"
 
 [project.urls]
-Homepage = "https://github.com/Blaizzy/mlx-audio"
-Repository = "https://github.com/Blaizzy/mlx-audio"
+Homepage = "https://github.com/DePasqualeOrg/mlx-audio-plus"
+Repository = "https://github.com/DePasqualeOrg/mlx-audio-plus"
 
 [tool.setuptools.dynamic]
 version = {attr = "mlx_audio.version.__version__"}
