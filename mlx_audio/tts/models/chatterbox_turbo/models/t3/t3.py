@@ -186,8 +186,8 @@ class T3(nn.Module):
             chunk_tokens.append(next_speech_token)
             current_speech_token = next_speech_token
 
-            # Check for EOS - need to evaluate to check the value
-            mx.eval(next_speech_token)
+            # Start async eval before extracting token - GPU works while we prepare
+            mx.async_eval(next_speech_token, cache)
             if int(next_speech_token[0, 0]) == self.hp.stop_speech_token:
                 # Yield remaining tokens (excluding EOS)
                 if len(chunk_tokens) > 1:
@@ -299,8 +299,8 @@ class T3(nn.Module):
             all_generated = mx.concatenate([all_generated, next_speech_token], axis=1)
             current_speech_token = next_speech_token
 
-            # Check for EOS
-            mx.eval(next_speech_token)
+            # Start async eval before extracting token - GPU works while we prepare
+            mx.async_eval(next_speech_token, cache)
             if int(next_speech_token[0, 0]) == self.hp.stop_speech_token:
                 break
 
