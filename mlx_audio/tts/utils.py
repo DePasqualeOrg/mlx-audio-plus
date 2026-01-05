@@ -21,6 +21,7 @@ MODEL_REMAPPING = {
     "voxcpm1.5": "voxcpm",
     "vibevoice_streaming": "vibevoice",
     "chatterbox_turbo": "chatterbox_turbo",
+    "soprano": "soprano",
 }
 
 # Models that require custom conversion from PyTorch source weights
