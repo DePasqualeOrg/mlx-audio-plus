@@ -134,9 +134,6 @@ class CosyVoice3ConditionalCFM(nn.Module):
         """
         Solve the ODE using Euler method with classifier-free guidance.
 
-        Uses batched computation for efficiency: conditional and unconditional
-        paths are batched together in a single forward pass through the estimator.
-
         Args:
             z: Initial noise (B, mel_dim, N)
             mu: Condition embedding (B, mel_dim, N)
@@ -149,19 +146,19 @@ class CosyVoice3ConditionalCFM(nn.Module):
         Returns:
             Generated mel-spectrogram (B, mel_dim, N)
         """
+        B, mel_dim, N = mu.shape
+        
         # Create time span with cosine schedule
         t_span = mx.linspace(0, 1, n_timesteps + 1)
         if self.t_scheduler == "cosine":
             t_span = 1 - mx.cos(t_span * 0.5 * math.pi)
 
         x = z
-        B = mu.shape[0]
 
         # Squeeze mask for DiT
         mask_squeeze = mask.squeeze(1)  # (B, N)
 
         # Pre-allocate batched tensors for CFG (batch size 2*B)
-        # First B samples: conditional, Last B samples: unconditional
         mu_zeros = mx.zeros_like(mu)
         spks_zeros = mx.zeros_like(spks)
         cond_zeros = mx.zeros_like(cond)
@@ -171,15 +168,13 @@ class CosyVoice3ConditionalCFM(nn.Module):
             dt = t_span[step] - t_span[step - 1]
 
             # Batch conditional and unconditional inputs together
-            # This matches PyTorch's efficient batched CFG computation
-            x_batched = mx.concatenate([x, x], axis=0)  # (2B, mel_dim, N)
+            x_batched = mx.concatenate([x, x], axis=0)
             mask_batched = mx.concatenate([mask_squeeze, mask_squeeze], axis=0)
-            mu_batched = mx.concatenate([mu, mu_zeros], axis=0)  # cond, then uncond
+            mu_batched = mx.concatenate([mu, mu_zeros], axis=0)
             spks_batched = mx.concatenate([spks, spks_zeros], axis=0)
             cond_batched = mx.concatenate([cond, cond_zeros], axis=0)
             t_batched = mx.broadcast_to(t, (2 * B,))
 
-            # Single batched forward pass through estimator
             dphi_dt_batched = self.estimator(
                 x=x_batched,
                 mask=mask_batched,
@@ -190,19 +185,14 @@ class CosyVoice3ConditionalCFM(nn.Module):
                 streaming=streaming,
             )
 
-            # Split back into conditional and unconditional
             dphi_dt_cond = dphi_dt_batched[:B]
             dphi_dt_uncond = dphi_dt_batched[B:]
 
-            # Classifier-free guidance
             dphi_dt = (
                 1.0 + self.inference_cfg_rate
             ) * dphi_dt_cond - self.inference_cfg_rate * dphi_dt_uncond
 
-            # Euler step
             x = x + dt * dphi_dt
-
-            # Force evaluation to prevent computation graph explosion
             mx.eval(x)
 
         return x.astype(mx.float32)
@@ -339,7 +329,7 @@ class CausalMaskedDiffWithDiT(nn.Module):
         embedding: mx.array,
         streaming: bool = False,
         finalize: bool = True,
-    ) -> Tuple[mx.array, None]:
+    ) -> Tuple[mx.array, Optional[mx.array]]:
         """
         Generate mel-spectrogram from speech tokens.
 

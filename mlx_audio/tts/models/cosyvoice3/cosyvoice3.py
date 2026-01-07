@@ -150,7 +150,7 @@ class CosyVoice3(nn.Module):
             streaming: Whether in streaming mode
 
         Returns:
-            Tuple of (mel_spectrogram, flow_cache)
+            Tuple of (mel_spectrogram, None)
         """
         if self.flow is None:
             raise RuntimeError("Flow module not initialized")
@@ -533,7 +533,7 @@ class CosyVoice3(nn.Module):
         speech_tokens = []
         chunk_idx = 0
         pre_lookahead_len = self.flow.pre_lookahead_len
-        token_mel_ratio = self.flow.token_mel_ratio
+        last_audio_len = 0  # 记录上一次返回的音频长度
 
         for token in self.generate_tokens(
             text=text,
@@ -552,6 +552,7 @@ class CosyVoice3(nn.Module):
             # Process chunk when enough tokens accumulated
             if len(speech_tokens) >= (chunk_idx + 1) * chunk_size + pre_lookahead_len:
                 end_idx = (chunk_idx + 1) * chunk_size + pre_lookahead_len
+                # 传递累积的 token，streaming=True 时模型内部会优化
                 chunk_tokens = mx.array(speech_tokens[:end_idx]).reshape(1, -1)
                 chunk_len = mx.array([end_idx], dtype=mx.int32)
 
@@ -569,16 +570,18 @@ class CosyVoice3(nn.Module):
                 )
 
                 audio = self.mel_to_audio(mel, finalize=False)
-
-                # Extract just the new chunk
-                chunk_start = chunk_idx * chunk_size * token_mel_ratio
-                if audio.shape[-1] > chunk_start:
-                    chunk_audio = audio[:, chunk_start:]
-                    yield chunk_audio.squeeze(0)
+                audio_1d = audio.squeeze(0)
+                
+                # 从完整音频中提取新增部分
+                if audio_1d.shape[0] > last_audio_len:
+                    yield audio_1d[last_audio_len:]
+                    last_audio_len = audio_1d.shape[0]
+                
                 chunk_idx += 1
 
         # Final chunk
-        if len(speech_tokens) > chunk_idx * chunk_size:
+        remaining = len(speech_tokens) - (chunk_idx * chunk_size)
+        if remaining > 0 or last_audio_len == 0:
             chunk_tokens = mx.array(speech_tokens).reshape(1, -1)
             chunk_len = mx.array([len(speech_tokens)], dtype=mx.int32)
 
@@ -596,10 +599,11 @@ class CosyVoice3(nn.Module):
             )
 
             audio = self.mel_to_audio(mel, finalize=True)
-
-            chunk_start = chunk_idx * chunk_size * token_mel_ratio
-            if audio.shape[-1] > chunk_start:
-                yield audio.squeeze(0)[chunk_start:]
+            audio_1d = audio.squeeze(0)
+            
+            # 从完整音频中提取新增部分
+            if audio_1d.shape[0] > last_audio_len:
+                yield audio_1d[last_audio_len:]
 
 
 def load_cosyvoice3(
@@ -1149,6 +1153,81 @@ class Model(nn.Module):
 
         # Generate audio using appropriate mode
         try:
+
+            if stream:
+                # 使用真正的流式生成
+                # 固定 chunk_size 为默认值 50，平衡生成效率和实时性
+                chunk_size = 50
+
+                print(f"[COSYVOICE3 LOG] 开始流式生成，chunk_size={chunk_size}")
+                stream_start_time = time.time()
+                synthesize_start_time = time.time()
+
+                # 统一处理不同情况下的 prompt_text 和 prompt_text_len
+                if instruct_text:
+                    # Instruct mode
+                    instruct_with_marker = instruct_text + "<|endofprompt|>"
+                    instruct_tokens = self._tokenizer.encode(
+                        instruct_with_marker, add_special_tokens=False
+                    )
+                    prompt_text = mx.array([instruct_tokens], dtype=mx.int32)
+                    prompt_text_len = mx.array([len(instruct_tokens)], dtype=mx.int32)
+                elif ref_text:
+                    # Zero-shot mode
+                    prompt_text = prompt_text  # 直接使用之前准备好的 prompt_text
+                    prompt_text_len = prompt_text_len  # 直接使用之前准备好的 prompt_text_len
+                else:
+                    # Cross-lingual mode
+                    prompt_text = mx.zeros((1, 0), dtype=mx.int32)
+                    prompt_text_len = mx.array([0], dtype=mx.int32)
+
+                # 使用统一的循环处理所有情况，避免重复代码
+                for i, audio_chunk in enumerate(self._model.synthesize_streaming(
+                        text=text_array,
+                        text_len=text_len,
+                        prompt_text=prompt_text,
+                        prompt_text_len=prompt_text_len,
+                        prompt_speech_token=prompt_speech_token,
+                        prompt_speech_token_len=prompt_speech_token_len,
+                        prompt_mel=prompt_mel,
+                        prompt_mel_len=prompt_mel_len,
+                        speaker_embedding=speaker_embedding,
+                        sampling=25,
+                        n_timesteps=10,
+                        chunk_size=chunk_size,
+                        max_token_text_ratio=20.0,
+                        min_token_text_ratio=2.0,
+                )):
+                    synthesize_time = time.time() - synthesize_start_time
+                    print(
+                        f"[COSYVOICE3 LOG] 获得音频块 {i + 1}，耗时: {synthesize_time:.2f}秒，长度: {audio_chunk.shape[-1]}采样点")
+                    synthesize_start_time = time.time()
+
+                    audio_out = audio_chunk.squeeze()
+                    num_samples = audio_out.shape[0]
+                    processing_time = time.time() - start_time
+
+                    yield GenerationResult(
+                        audio=audio_out,
+                        samples=num_samples,
+                        sample_rate=self._sample_rate,
+                        segment_idx=i,
+                        token_count=len(text_tokens),
+                        audio_samples={
+                            "samples": num_samples,
+                            "samples-per-sec": num_samples / processing_time if processing_time > 0 else 0,
+                        },
+                        audio_duration=f"00:00:{num_samples / self._sample_rate:.3f}",
+                        real_time_factor=1.0,
+                        prompt={"tokens-per-sec": len(text_tokens) / processing_time if processing_time > 0 else 0},
+                        processing_time_seconds=processing_time,
+                        peak_memory_usage=mx.get_peak_memory() / 1e9 if hasattr(mx, "get_peak_memory") else 0,
+                    )
+
+                total_stream_time = time.time() - stream_start_time
+                print(f"[COSYVOICE3 LOG] 流式生成完成，总耗时: {total_stream_time:.2f}秒")
+                return  # 修复：stream=True 时直接返回，避免继续执行到后面的 audio 变量访问
+
             if source_audio is not None:
                 audio = self._model.synthesize_vc(
                     source_speech_token=source_speech_token,

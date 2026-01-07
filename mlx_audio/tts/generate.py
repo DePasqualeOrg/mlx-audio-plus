@@ -2,7 +2,7 @@ import argparse
 import os
 import random
 import sys
-from typing import Optional, Tuple, Union
+from typing import Any, AsyncGenerator, Optional, Tuple, Union
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -410,12 +410,143 @@ def generate_audio(
         traceback.print_exc()
 
 
+async def asyn_generate_audio(
+    text: str,
+    model: Optional[Union[str, nn.Module]] = "prince-canuma/Kokoro-82M",
+    voice: str = "af_heart",
+    speed: float = 1.0,
+    lang_code: str = "a",
+    temperature: float = 0.7,
+    streaming_interval: float = 2.0,
+    ref_audio: Optional[str] = None,
+    ref_text: Optional[str] = None,
+    **kwargs,
+) -> AsyncGenerator[Any, None]:
+    """
+    Asynchronously generates audio from text using a specified TTS model.
+    Returns an async generator that yields audio segments with their metadata.
+
+    Parameters:
+    - text (str): The input text to be converted to speech.
+    - model (str): The TTS model to use.
+    - voice (str): The voice style to use.
+    - speed (float): Playback speed multiplier.
+    - lang_code (str): The language code.
+    - temperature (float): The temperature for the model.
+    - streaming_interval (float): Time interval in seconds for streaming segments.
+    - ref_audio (str): Path to reference audio for voice cloning.
+    - ref_text (str): Caption for reference audio.
+    Returns:
+    - AsyncGenerator[Any, None]: An async generator of audio segments with their metadata.
+    """
+    import time
+    total_start = time.time()
+    print(f"[LOG] asyn_generate_audio 开始，文本长度: {len(text)} 字符")
+    
+    local_model = model
+    local_ref_text = ref_text
+
+    if local_model is None:
+        raise ValueError("Model path or model instance must be provided.")
+
+    model_load_start = time.time()
+    if isinstance(local_model, str):
+        print(f"[LOG] 开始加载模型: {local_model}")
+        local_model = load_model(model_path=local_model)
+        print(f"[LOG] 模型加载完成，耗时: {time.time() - model_load_start:.2f}秒")
+    else:
+        print(f"[LOG] 使用已加载的模型")
+
+    ref_audio_loaded = None
+    if ref_audio:
+        ref_audio_start = time.time()
+        if not os.path.exists(ref_audio):
+            raise FileNotFoundError(f"Reference audio file not found: {ref_audio}")
+
+        normalize = False
+        if hasattr(local_model, "model_type") and local_model.model_type() == "spark":
+            normalize = True
+
+        ref_audio_loaded = load_audio(
+            ref_audio, sample_rate=local_model.sample_rate, volume_normalize=normalize
+        )
+        print(f"[LOG] 参考音频加载完成，耗时: {time.time() - ref_audio_start:.2f}秒")
+
+        if not local_ref_text:
+            import inspect
+
+            if "ref_text" in inspect.signature(local_model.generate).parameters:
+                stt_start = time.time()
+                print("[LOG] 开始转录参考音频...")
+                from mlx_audio.stt.models.whisper import Model as Whisper
+
+                stt_model = Whisper.from_pretrained(
+                    path_or_hf_repo="mlx-community/whisper-large-v3-turbo-4bit"
+                )
+                local_ref_text = stt_model.generate(ref_audio_loaded).text
+                print(f"[LOG] 参考音频转录完成: '{local_ref_text}'，耗时: {time.time() - stt_start:.2f}秒")
+                del stt_model
+                mx.clear_cache()
+
+    sample_rate = local_model.sample_rate
+    interval_samples = int(streaming_interval * sample_rate)
+    accumulated_audio = mx.array([], dtype=mx.float32)  # 累积的音频，减少拼接次数
+    buffer_duration = 0.0
+    segment_idx = 0
+
+    gen_kwargs = dict(
+        text=text,
+        voice=voice,
+        speed=speed,
+        lang_code=lang_code,
+        ref_audio=ref_audio_loaded,
+        ref_text=local_ref_text,
+        temperature=temperature,
+        stream=True,
+        streaming_interval=streaming_interval,
+        **kwargs,
+    )
+
+    print(f"[LOG] 开始模型生成，streaming_interval={streaming_interval}秒")
+    gen_start = time.time()
+    
+    # 直接返回模型生成的完整音频，确保客户端收到完整的音频数据
+    # 这是最可靠的方式，确保生成的音频数据完整
+    for i, result in enumerate(local_model.generate(**gen_kwargs)):
+        gen_time = time.time() - gen_start
+        print(f"[LOG] 模型返回音频，耗时: {gen_time:.2f}秒，总长度: {result.audio.shape[0]}采样点")
+        gen_start = time.time()
+        
+        # 直接返回模型生成的完整音频，不进行额外处理
+        actual_duration = result.audio.shape[0] / sample_rate
+        duration_str = f"00:00:{int(actual_duration):02d}.{int((actual_duration % 1) * 1000):03d}"
+        
+        yield type(result)(
+            audio=result.audio,
+            samples=result.audio.shape[0],
+            sample_rate=sample_rate,
+            segment_idx=i,
+            token_count=result.token_count,
+            audio_duration=duration_str,
+            real_time_factor=result.real_time_factor,
+            prompt=result.prompt,
+            audio_samples={
+                "samples": result.audio.shape[0],
+                "samples-per-sec": round(result.audio.shape[0] / actual_duration, 2),
+            },
+            processing_time_seconds=result.processing_time_seconds,
+            peak_memory_usage=result.peak_memory_usage,
+        )
+    
+    total_time = time.time() - total_start
+    print(f"[LOG] asyn_generate_audio 完成，总耗时: {total_time:.2f}秒")
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate audio from text using TTS.")
     parser.add_argument(
         "--model",
         type=str,
-        default="mlx-community/Kokoro-82M-bf16",
+        default="mlx-community/Fun-CosyVoice3-0.5B-2512-fp16",
         help="Path or repo id of the model",
     )
     parser.add_argument(
