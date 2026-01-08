@@ -989,8 +989,6 @@ class Model(nn.Module):
         Yields:
             GenerationResult with generated audio
         """
-        import time
-
         import numpy as np
         from scipy.signal import resample
 
@@ -1003,6 +1001,7 @@ class Model(nn.Module):
 
         from ..base import GenerationResult
 
+        import time
         start_time = time.time()
 
         # Validate ref_audio is provided
@@ -1159,10 +1158,6 @@ class Model(nn.Module):
                 # 固定 chunk_size 为默认值 50，平衡生成效率和实时性
                 chunk_size = 50
 
-                print(f"[COSYVOICE3 LOG] 开始流式生成，chunk_size={chunk_size}")
-                stream_start_time = time.time()
-                synthesize_start_time = time.time()
-
                 # 统一处理不同情况下的 prompt_text 和 prompt_text_len
                 if instruct_text:
                     # Instruct mode
@@ -1198,11 +1193,7 @@ class Model(nn.Module):
                         max_token_text_ratio=20.0,
                         min_token_text_ratio=2.0,
                 )):
-                    synthesize_time = time.time() - synthesize_start_time
-                    print(
-                        f"[COSYVOICE3 LOG] 获得音频块 {i + 1}，耗时: {synthesize_time:.2f}秒，长度: {audio_chunk.shape[-1]}采样点")
-                    synthesize_start_time = time.time()
-
+                    import time
                     audio_out = audio_chunk.squeeze()
                     num_samples = audio_out.shape[0]
                     processing_time = time.time() - start_time
@@ -1224,8 +1215,6 @@ class Model(nn.Module):
                         peak_memory_usage=mx.get_peak_memory() / 1e9 if hasattr(mx, "get_peak_memory") else 0,
                     )
 
-                total_stream_time = time.time() - stream_start_time
-                print(f"[COSYVOICE3 LOG] 流式生成完成，总耗时: {total_stream_time:.2f}秒")
                 return  # 修复：stream=True 时直接返回，避免继续执行到后面的 audio 变量访问
 
             if source_audio is not None:
@@ -1295,8 +1284,6 @@ class Model(nn.Module):
         audio_out = audio.squeeze()
         num_samples = audio_out.shape[0]
 
-        end_time = time.time()
-        processing_time = end_time - start_time
         audio_duration_secs = num_samples / self._sample_rate
 
         mins = int(audio_duration_secs // 60)
