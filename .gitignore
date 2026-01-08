@@ -51,5 +51,6 @@ output/
 
 # uv
 .build
+uv.lock
 
 tmp/
