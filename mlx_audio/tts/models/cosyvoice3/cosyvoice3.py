@@ -11,6 +11,7 @@ This module provides the main CosyVoice3 model class that integrates:
 """
 
 import logging
+import math
 from pathlib import Path
 from typing import Generator, List, Optional, Tuple
 
@@ -23,6 +24,11 @@ from .hifigan import CausalHiFTGenerator
 from .llm import CosyVoice3LM, Qwen2Encoder, ras_sampling, top_k_sampling
 
 logger = logging.getLogger(__name__)
+
+# FSQ silent and breath tokens (from PyTorch CosyVoice3Model)
+# These are filtered during streaming to avoid excessive pauses
+SILENT_TOKENS = {1, 2, 28, 29, 55, 248, 494, 2241, 2242, 2322, 2323}
+MAX_SILENT_TOKEN_NUM = 5
 
 
 class CosyVoice3(nn.Module):
@@ -502,14 +508,16 @@ class CosyVoice3(nn.Module):
         speaker_embedding: mx.array,
         sampling: int = 25,
         n_timesteps: int = 10,
-        chunk_size: int = 50,
+        chunk_size: int = 25,
         max_token_text_ratio: float = 20.0,
         min_token_text_ratio: float = 2.0,
+        filter_silent_tokens: bool = True,
     ) -> Generator[mx.array, None, None]:
         """
         Streaming speech synthesis with chunked output.
 
         Generates audio in chunks as tokens are produced, reducing latency.
+        This implementation closely follows PyTorch CosyVoice3Model.tts().
 
         Args:
             text: Text token IDs (1, T)
@@ -523,17 +531,32 @@ class CosyVoice3(nn.Module):
             speaker_embedding: Speaker embedding (1, D_spk)
             sampling: Top-k sampling parameter
             n_timesteps: Number of flow matching steps
-            chunk_size: Number of tokens per chunk
+            chunk_size: Number of tokens per chunk (default 25, must match training)
             max_token_text_ratio: Maximum speech/text ratio
             min_token_text_ratio: Minimum speech/text ratio
+            filter_silent_tokens: Whether to filter consecutive silent tokens
 
         Yields:
             Audio waveform chunks
         """
-        speech_tokens = []
-        chunk_idx = 0
         pre_lookahead_len = self.flow.pre_lookahead_len
         token_mel_ratio = self.flow.token_mel_ratio
+
+        # Calculate prompt token padding to align first chunk to chunk_size boundary
+        # This matches PyTorch: prompt_token_pad = ceil(prompt_len / chunk_size) * chunk_size - prompt_len
+        prompt_len = int(prompt_speech_token_len[0].item())
+        prompt_token_pad = (
+            int(math.ceil(prompt_len / chunk_size) * chunk_size) - prompt_len
+        )
+
+        # State for streaming
+        speech_tokens: List[int] = []
+        token_offset = 0
+        mel_cache: Optional[mx.array] = None
+        speech_offset = 0
+
+        # Silent token filtering state
+        cur_silent_token_num = 0
 
         for token in self.generate_tokens(
             text=text,
@@ -547,14 +570,32 @@ class CosyVoice3(nn.Module):
             max_token_text_ratio=max_token_text_ratio,
             min_token_text_ratio=min_token_text_ratio,
         ):
+            # Filter consecutive silent tokens (matches PyTorch llm_job)
+            if filter_silent_tokens and token in SILENT_TOKENS:
+                cur_silent_token_num += 1
+                if cur_silent_token_num > MAX_SILENT_TOKEN_NUM:
+                    continue
+            else:
+                cur_silent_token_num = 0
+
             speech_tokens.append(token)
 
+            # Calculate current chunk size (first chunk includes padding)
+            this_chunk_size = (
+                chunk_size + prompt_token_pad if token_offset == 0 else chunk_size
+            )
+
             # Process chunk when enough tokens accumulated
-            if len(speech_tokens) >= (chunk_idx + 1) * chunk_size + pre_lookahead_len:
-                end_idx = (chunk_idx + 1) * chunk_size + pre_lookahead_len
-                chunk_tokens = mx.array(speech_tokens[:end_idx]).reshape(1, -1)
+            # Matches PyTorch: len(tokens) - token_offset >= this_chunk_size + pre_lookahead_len
+            if len(speech_tokens) - token_offset >= this_chunk_size + pre_lookahead_len:
+                # Take all tokens up to current position + lookahead
+                end_idx = token_offset + this_chunk_size + pre_lookahead_len
+                chunk_tokens = mx.array(
+                    speech_tokens[:end_idx], dtype=mx.int32
+                ).reshape(1, -1)
                 chunk_len = mx.array([end_idx], dtype=mx.int32)
 
+                # Generate mel via flow
                 mel, _ = self.tokens_to_mel(
                     tokens=chunk_tokens,
                     token_len=chunk_len,
@@ -568,18 +609,31 @@ class CosyVoice3(nn.Module):
                     streaming=True,
                 )
 
-                audio = self.mel_to_audio(mel, finalize=False)
+                # Slice mel to get only new portion (from token_offset)
+                mel_new = mel[:, :, token_offset * token_mel_ratio :]
 
-                # Extract just the new chunk
-                chunk_start = chunk_idx * chunk_size * token_mel_ratio
-                if audio.shape[-1] > chunk_start:
-                    chunk_audio = audio[:, chunk_start:]
+                # Accumulate mel (matches PyTorch caching strategy)
+                if mel_cache is not None:
+                    mel_cache = mx.concatenate([mel_cache, mel_new], axis=2)
+                else:
+                    mel_cache = mel_new
+
+                # Generate audio from accumulated mel
+                audio = self.mel_to_audio(mel_cache, finalize=False)
+
+                # Extract only new audio (from speech_offset)
+                if audio.shape[-1] > speech_offset:
+                    chunk_audio = audio[:, speech_offset:]
+                    speech_offset += chunk_audio.shape[-1]
                     yield chunk_audio.squeeze(0)
-                chunk_idx += 1
 
-        # Final chunk
-        if len(speech_tokens) > chunk_idx * chunk_size:
-            chunk_tokens = mx.array(speech_tokens).reshape(1, -1)
+                # Advance token offset
+                token_offset += this_chunk_size
+
+        # Final chunk - process remaining tokens
+        # Note: PyTorch uses streaming=False for final chunk (full attention)
+        if len(speech_tokens) > token_offset:
+            chunk_tokens = mx.array(speech_tokens, dtype=mx.int32).reshape(1, -1)
             chunk_len = mx.array([len(speech_tokens)], dtype=mx.int32)
 
             mel, _ = self.tokens_to_mel(
@@ -592,14 +646,24 @@ class CosyVoice3(nn.Module):
                 embedding=speaker_embedding,
                 finalize=True,
                 n_timesteps=n_timesteps,
-                streaming=True,
+                streaming=False,
             )
 
-            audio = self.mel_to_audio(mel, finalize=True)
+            # Slice mel to get only new portion
+            mel_new = mel[:, :, token_offset * token_mel_ratio :]
 
-            chunk_start = chunk_idx * chunk_size * token_mel_ratio
-            if audio.shape[-1] > chunk_start:
-                yield audio.squeeze(0)[chunk_start:]
+            # Accumulate mel
+            if mel_cache is not None:
+                mel_cache = mx.concatenate([mel_cache, mel_new], axis=2)
+            else:
+                mel_cache = mel_new
+
+            # Generate final audio
+            audio = self.mel_to_audio(mel_cache, finalize=True)
+
+            # Extract only new audio
+            if audio.shape[-1] > speech_offset:
+                yield audio.squeeze(0)[speech_offset:]
 
 
 def load_cosyvoice3(
