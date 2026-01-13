@@ -184,9 +184,8 @@ class EuclideanCodebook(nn.Module):
         self.embed = mx.zeros((codebook_size, dim))
 
     def preprocess(self, x: mx.array) -> mx.array:
-        # Flatten all but the last dimension
-        x = x.reshape(-1, x.shape[-1])
-        return x
+        # rearrange "... d -> (...) d" - flatten all dims except last
+        return x.reshape(-1, x.shape[-1])
 
     def quantize(self, x: mx.array) -> mx.array:
         embed = self.embed.T

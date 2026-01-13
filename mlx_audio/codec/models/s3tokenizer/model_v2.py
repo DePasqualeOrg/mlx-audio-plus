@@ -97,9 +97,8 @@ class FSQCodebook(nn.Module):
         self.embed = None
 
     def preprocess(self, x: mx.array) -> mx.array:
-        # Flatten all but the last dimension
-        x = x.reshape(-1, x.shape[-1])
-        return x
+        # rearrange "... d -> (...) d" - flatten all dims except last
+        return x.reshape(-1, x.shape[-1])
 
     def encode(self, x: mx.array) -> mx.array:
         x_shape = x.shape
