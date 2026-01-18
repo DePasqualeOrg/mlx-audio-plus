@@ -1,6 +1,6 @@
-"""Main module for MLX Audio Plus API server.
+"""Main module for MLX Audio API server.
 
-This module provides a FastAPI-based server for hosting MLX Audio Plus models,
+This module provides a FastAPI-based server for hosting MLX Audio models,
 including Text-to-Speech (TTS), Speech-to-Text (STT), and Speech-to-Speech (S2S) models.
 It offers an OpenAI-compatible API for Audio completions and model management.
 """
@@ -8,19 +8,64 @@ It offers an OpenAI-compatible API for Audio completions and model management.
 import argparse
 import asyncio
 import io
+import json
 import os
+import subprocess
 import time
+import webbrowser
+from dataclasses import asdict, is_dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import unquote
 
-import soundfile as sf
+import mlx.core as mx
+import numpy as np
 import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
+import webrtcvad
+from fastapi import (
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Response,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from mlx_audio.audio_io import read as audio_read
+from mlx_audio.audio_io import write as audio_write
 from mlx_audio.utils import load_model
+
+
+def sanitize_for_json(obj: Any) -> Any:
+    """Recursively sanitize NaN, Infinity, and -Infinity values for JSON serialization."""
+    # Handle dataclasses
+    if is_dataclass(obj) and not isinstance(obj, type):
+        obj = asdict(obj)
+
+    if isinstance(obj, dict):
+        return {k: sanitize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [sanitize_for_json(item) for item in obj]
+    elif isinstance(obj, float):
+        if np.isnan(obj):
+            return None
+        elif np.isinf(obj):
+            return None
+        return obj
+    elif isinstance(obj, np.floating):
+        if np.isnan(obj):
+            return None
+        elif np.isinf(obj):
+            return None
+        return float(obj)
+    else:
+        return obj
+
 
 MLX_AUDIO_NUM_WORKERS = os.getenv("MLX_AUDIO_NUM_WORKERS", "2")
 
@@ -126,6 +171,13 @@ class SpeechRequest(BaseModel):
 model_provider = ModelProvider()
 
 
+@app.get("/")
+async def root():
+    return {
+        "message": "Welcome to the MLX Audio API server! Visit https://localhost:3000 for the UI."
+    }
+
+
 @app.get("/v1/models")
 async def list_models():
     """
@@ -200,7 +252,7 @@ async def generate_audio(model, payload: SpeechRequest, verbose: bool = False):
 
         sample_rate = result.sample_rate
         buffer = io.BytesIO()
-        sf.write(buffer, result.audio, sample_rate, format=payload.response_format)
+        audio_write(buffer, result.audio, sample_rate, format=payload.response_format)
         buffer.seek(0)
         yield buffer.getvalue()
 
@@ -227,10 +279,10 @@ async def stt_transcriptions(
     """Transcribe audio using an STT model in OpenAI format."""
     data = await file.read()
     tmp = io.BytesIO(data)
-    audio, sr = sf.read(tmp, always_2d=False)
+    audio, sr = audio_read(tmp, always_2d=False)
     tmp.close()
     tmp_path = f"/tmp/{time.time()}.mp3"
-    sf.write(tmp_path, audio, sr)
+    audio_write(tmp_path, audio, sr)
 
     stt_model = model_provider.load_model(model)
     result = stt_model.generate(tmp_path)
@@ -398,7 +450,7 @@ async def stt_realtime_transcriptions(websocket: WebSocket):
 
                     # Save to temporary file for processing
                     tmp_path = f"/tmp/realtime_initial_{time.time()}.mp3"
-                    sf.write(tmp_path, audio_array, sample_rate)
+                    audio_write(tmp_path, audio_array, sample_rate)
 
                     try:
                         # Generate transcription for initial chunk
@@ -453,7 +505,7 @@ async def stt_realtime_transcriptions(websocket: WebSocket):
 
                     # Save to temporary file for processing
                     tmp_path = f"/tmp/realtime_{time.time()}.mp3"
-                    sf.write(tmp_path, audio_array, sample_rate)
+                    audio_write(tmp_path, audio_array, sample_rate)
 
                     try:
                         # Generate transcription
@@ -607,7 +659,7 @@ class MLXAudioStudioServer:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="MLX Audio Plus API server")
+    parser = argparse.ArgumentParser(description="MLX Audio API server")
     parser.add_argument(
         "--allowed-origins",
         nargs="+",
@@ -615,7 +667,7 @@ def main():
         help="List of allowed origins for CORS",
     )
     parser.add_argument(
-        "--host", type=str, default="0.0.0.0", help="Host to run the server on"
+        "--host", type=str, default="localhost", help="Host to run the server on"
     )
     parser.add_argument(
         "--port", type=int, default=8000, help="Port to run the server on"
@@ -644,64 +696,16 @@ def main():
         --workers 0.5 (will use half the number of CPU cores available)
         --workers 0.0 (will use 1 worker)""",
     )
-
-    args = parser.parse_args()
-    if isinstance(args.workers, float):
-        args.workers = max(1, int(os.cpu_count() * args.workers))
-
-    setup_cors(app, args.allowed_origins)
-
-    uvicorn.run(
-        "mlx_audio.server:app",
-        host=args.host,
-        port=args.port,
-        reload=args.reload,
-        workers=args.workers,
-        loop="asyncio",
-    )
-
-
-if __name__ == "__main__":
-    main()
-
-
-def main():
-    parser = argparse.ArgumentParser(description="MLX Audio Plus API server")
     parser.add_argument(
-        "--allowed-origins",
-        nargs="+",
-        default=["*"],
-        help="List of allowed origins for CORS",
+        "--start-ui",
+        action="store_true",
+        help="Start the Studio UI alongside the API server",
     )
     parser.add_argument(
-        "--host", type=str, default="0.0.0.0", help="Host to run the server on"
-    )
-    parser.add_argument(
-        "--port", type=int, default=8000, help="Port to run the server on"
-    )
-    parser.add_argument(
-        "--reload",
-        type=bool,
-        default=False,
-        help="Enable auto-reload of the server. Only works when 'workers' is set to None.",
-    )
-
-    parser.add_argument(
-        "--workers",
-        type=int_or_float,
-        default=calculate_default_workers(),
-        help="""Number of workers. Overrides the `MLX_AUDIO_NUM_WORKERS` env variable.
-        Can be either an int or a float.
-        If an int, it will be the number of workers to use.
-        If a float, number of workers will be this fraction of the  number of CPU cores available, with a minimum of 1.
-        Defaults to the `MLX_AUDIO_NUM_WORKERS` env variable if set and to 2 if not.
-        To use all available CPU cores, set it to 1.0.
-
-        Examples:
-        --workers 1 (will use 1 worker)
-        --workers 1.0 (will use all available CPU cores)
-        --workers 0.5 (will use half the number of CPU cores available)
-        --workers 0.0 (will use 1 worker)""",
+        "--log-dir",
+        type=str,
+        default="logs",
+        help="Directory to save server logs",
     )
 
     args = parser.parse_args()
@@ -710,13 +714,12 @@ def main():
 
     setup_cors(app, args.allowed_origins)
 
-    uvicorn.run(
-        "mlx_audio.server:app",
+    client = MLXAudioStudioServer(start_ui=args.start_ui, log_dir=args.log_dir)
+    client.start_server(
         host=args.host,
         port=args.port,
-        reload=args.reload,
+        reload=args.reload if args.workers is None else False,
         workers=args.workers,
-        loop="asyncio",
     )
 
 
