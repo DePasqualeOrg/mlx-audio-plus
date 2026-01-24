@@ -248,6 +248,12 @@ class Model(nn.Module):
             if "rotary_emb.inv_freq" in new_key:
                 continue
 
+            # Preserve quantization keys (scales, biases) - they're needed for loading
+            # quantized weights even though they don't exist in the unquantized model
+            if new_key.endswith(".scales") or new_key.endswith(".biases"):
+                new_weights[new_key] = v
+                continue
+
             # Check if key exists in model
             if new_key not in curr_shapes:
                 # Debug: uncomment to see missing keys
