@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel", "setuptools-scm>=8.0"]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,14 +7,13 @@ name = "mlx-audio-plus"
 dynamic = ["version"]
 description = "Python tools for text to speech (TTS), speech to text (STT), and speech to speech (STS) powered by MLX"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
 authors = [
     {name = "Anthony DePasquale", email = "anthony@depasquale.org"},
     {name = "Prince Canuma", email = "prince.gdt@gmail.com"},
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
 requires-python = ">=3.10"
