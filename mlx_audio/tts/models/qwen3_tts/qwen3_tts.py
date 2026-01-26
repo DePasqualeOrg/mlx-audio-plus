@@ -17,6 +17,7 @@ from tqdm import tqdm
 
 from mlx_audio.dsp import mel_filters, stft
 from mlx_audio.tts.models.base import GenerationResult
+from mlx_audio.utils import load_audio
 
 from .config import (
     ModelConfig,
@@ -655,17 +656,20 @@ class Model(nn.Module):
         token = categorical_sampling(logits, temperature)
         return token[:, None]
 
-    def _decode_chunk(self, codes: mx.array) -> mx.array:
+    def _decode_chunk(self, codes: mx.array, chunk_tokens: int = 100) -> mx.array:
         """Decode a chunk of codes to audio.
 
         Args:
             codes: [1, time, num_code_groups] codes to decode
+            chunk_tokens: Number of tokens per decode chunk (controls latency vs quality)
 
         Returns:
             audio: [samples] decoded audio waveform
         """
         audio_chunks = []
-        for chunk in self.speech_tokenizer.streaming_decode(codes):
+        for chunk in self.speech_tokenizer.streaming_decode(
+            codes, chunk_tokens=chunk_tokens
+        ):
             audio_chunks.append(chunk)
 
         audio = mx.concatenate(audio_chunks, axis=-1)[0]  # Remove batch dim
@@ -688,7 +692,7 @@ class Model(nn.Module):
         temperature: float = 0.9,
         speed: float = 1.0,
         lang_code: str = "auto",
-        ref_audio: Optional[mx.array] = None,
+        ref_audio: Optional[Union[str, mx.array]] = None,
         ref_text: Optional[str] = None,
         split_pattern: str = "\n",
         max_tokens: int = 4096,
@@ -714,7 +718,7 @@ class Model(nn.Module):
             temperature: Sampling temperature
             speed: Speech speed factor (not directly supported yet)
             lang_code: Language code (auto, chinese, english, etc.)
-            ref_audio: Reference audio for voice cloning
+            ref_audio: Reference audio for voice cloning (file path or mx.array)
             ref_text: Reference text for voice cloning
             split_pattern: Pattern to split text into segments
             max_tokens: Maximum tokens per segment
@@ -728,6 +732,10 @@ class Model(nn.Module):
         Yields:
             GenerationResult objects with generated audio
         """
+        # Load reference audio if provided (handles file paths and mx.array)
+        if ref_audio is not None:
+            ref_audio = load_audio(ref_audio, sample_rate=self.sample_rate)
+
         # Route to appropriate method based on model type
         tts_model_type = getattr(self.config, "tts_model_type", "base")
 
@@ -963,7 +971,9 @@ class Model(nn.Module):
                     codes_chunk = mx.stack(generated_codes[start_idx:], axis=1)
                     mx.eval(codes_chunk)
 
-                    audio_chunk = self._decode_chunk(codes_chunk)
+                    audio_chunk = self._decode_chunk(
+                        codes_chunk, chunk_tokens=streaming_chunk_size
+                    )
 
                     # Trim the context overlap from audio (only yield new audio)
                     if decoded_tokens > 0 and start_idx < decoded_tokens:
@@ -1006,7 +1016,9 @@ class Model(nn.Module):
                 codes_chunk = mx.stack(generated_codes[start_idx:], axis=1)
                 mx.eval(codes_chunk)
 
-                audio_chunk = self._decode_chunk(codes_chunk)
+                audio_chunk = self._decode_chunk(
+                    codes_chunk, chunk_tokens=streaming_chunk_size
+                )
 
                 # Trim the context overlap from audio (only yield new audio)
                 if decoded_tokens > 0 and start_idx < decoded_tokens:
@@ -1046,34 +1058,12 @@ class Model(nn.Module):
             # Stack all generated codes
             codes = mx.stack(generated_codes, axis=1)  # [1, seq_len, num_code_groups]
 
-            # Clear cache before decode to free generation memory
-            mx.eval(codes)
-            mx.clear_cache()
-
             # Non-streaming: decode all at once
-            num_tokens = codes.shape[1]
-            chunk_size = 25  # matches streaming_decode default
-            total_chunks = (num_tokens + chunk_size - 1) // chunk_size
+            audio, audio_lengths = self.speech_tokenizer.decode(codes)
+            audio = audio[0]  # Remove batch dim
 
-            audio_chunks = []
-            decode_pbar = tqdm(
-                self.speech_tokenizer.streaming_decode(codes),
-                total=total_chunks,
-                desc="Decoding",
-                unit="chunks",
-                disable=not verbose,
-                leave=False,
-            )
-            for chunk in decode_pbar:
-                audio_chunks.append(chunk)
-            decode_pbar.close()
-
-            audio = mx.concatenate(audio_chunks, axis=-1)[0]  # Remove batch dim
-
-            # Calculate valid length and trim
-            valid_len = int(
-                (codes[..., 0] > 0).sum() * self.speech_tokenizer.decode_upsample_rate
-            )
+            # Trim to valid length
+            valid_len = int(audio_lengths[0])
             if valid_len > 0 and valid_len < audio.shape[0]:
                 audio = audio[:valid_len]
 
@@ -1407,29 +1397,12 @@ class Model(nn.Module):
         ref_len = ref_codes.shape[2]
         total_len = full_codes.shape[1]
 
-        # Decode full codes to audio using streaming decode for lower peak memory
-        chunk_size = 25
-        total_chunks = (total_len + chunk_size - 1) // chunk_size
+        # Decode full codes to audio
+        audio, audio_lengths = self.speech_tokenizer.decode(full_codes)
+        audio = audio[0]  # Remove batch dim
 
-        audio_chunks = []
-        decode_pbar = tqdm(
-            self.speech_tokenizer.streaming_decode(full_codes),
-            total=total_chunks,
-            desc="Decoding",
-            unit="chunks",
-            disable=not verbose,
-            leave=False,
-        )
-        for chunk in decode_pbar:
-            audio_chunks.append(chunk)
-        decode_pbar.close()
-
-        audio = mx.concatenate(audio_chunks, axis=-1)[0]  # Remove batch dim
-
-        # Calculate valid length and trim
-        valid_len = int(
-            (full_codes[..., 0] > 0).sum() * self.speech_tokenizer.decode_upsample_rate
-        )
+        # Trim to valid length
+        valid_len = int(audio_lengths[0])
         if valid_len > 0 and valid_len < audio.shape[0]:
             audio = audio[:valid_len]
 
@@ -1625,7 +1598,9 @@ class Model(nn.Module):
                 codes_chunk = mx.stack(generated_codes[start_idx:], axis=1)
                 mx.eval(codes_chunk)
 
-                audio_chunk = self._decode_chunk(codes_chunk)
+                audio_chunk = self._decode_chunk(
+                    codes_chunk, chunk_tokens=streaming_chunk_size
+                )
 
                 # Trim the context overlap from audio (only yield new audio)
                 if decoded_tokens > 0 and start_idx < decoded_tokens:
@@ -1668,7 +1643,9 @@ class Model(nn.Module):
             codes_chunk = mx.stack(generated_codes[start_idx:], axis=1)
             mx.eval(codes_chunk)
 
-            audio_chunk = self._decode_chunk(codes_chunk)
+            audio_chunk = self._decode_chunk(
+                codes_chunk, chunk_tokens=streaming_chunk_size
+            )
 
             # Trim the context overlap from audio (only yield new audio)
             if decoded_tokens > 0 and start_idx < decoded_tokens:
@@ -1706,34 +1683,12 @@ class Model(nn.Module):
         # Stack all generated codes
         codes = mx.stack(generated_codes, axis=1)
 
-        # Clear cache before decode to free generation memory
-        mx.eval(codes)
-        mx.clear_cache()
+        # Non-streaming: decode all at once
+        audio, audio_lengths = self.speech_tokenizer.decode(codes)
+        audio = audio[0]  # Remove batch dim
 
-        # Decode to audio using streaming decode for lower peak memory
-        num_tokens = codes.shape[1]
-        chunk_size = 25
-        total_chunks = (num_tokens + chunk_size - 1) // chunk_size
-
-        audio_chunks = []
-        decode_pbar = tqdm(
-            self.speech_tokenizer.streaming_decode(codes),
-            total=total_chunks,
-            desc="Decoding",
-            unit="chunks",
-            disable=not verbose,
-            leave=False,
-        )
-        for chunk in decode_pbar:
-            audio_chunks.append(chunk)
-        decode_pbar.close()
-
-        audio = mx.concatenate(audio_chunks, axis=-1)[0]  # Remove batch dim
-
-        # Calculate valid length and trim
-        valid_len = int(
-            (codes[..., 0] > 0).sum() * self.speech_tokenizer.decode_upsample_rate
-        )
+        # Trim to valid length
+        valid_len = int(audio_lengths[0])
         if valid_len > 0 and valid_len < audio.shape[0]:
             audio = audio[:valid_len]
 
