@@ -91,6 +91,9 @@ dev = [
 Homepage = "https://github.com/DePasqualeOrg/mlx-audio-plus"
 Repository = "https://github.com/DePasqualeOrg/mlx-audio-plus"
 
+[tool.poetry]
+version = "0.0.0"
+
 [tool.setuptools.dynamic]
 version = {attr = "mlx_audio.version.__version__"}
 
