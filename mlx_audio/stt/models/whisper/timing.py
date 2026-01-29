@@ -13,7 +13,6 @@ import numpy as np
 from scipy import signal
 
 from .audio import HOP_LENGTH, SAMPLE_RATE, TOKENS_PER_SECOND
-from .tokenizer import Tokenizer
 
 if TYPE_CHECKING:
     from .model import Whisper
@@ -114,7 +113,7 @@ class WordTiming:
 
 def find_alignment(
     model: "Whisper",
-    tokenizer: Tokenizer,
+    tokenizer,
     text_tokens: List[int],
     mel: mx.array,
     num_frames: int,
@@ -224,11 +223,11 @@ def add_word_timestamps(
     *,
     segments: List[dict],
     model: "Whisper",
-    tokenizer: Tokenizer,
+    tokenizer,
     mel: mx.array,
     num_frames: int,
-    prepend_punctuations: str = "\"'“¿([{-",
-    append_punctuations: str = "\"'.。,，!！?？:：”)]}、",
+    prepend_punctuations: str = "\"'\u201c\u00bf([{-",
+    append_punctuations: str = "\"'.\u3002,\uff0c!\uff01?\uff1f:\uff1a\u201d)]\u007d\u3001",
     last_speech_timestamp: float,
     **kwargs,
 ):
