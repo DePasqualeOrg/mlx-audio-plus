@@ -180,16 +180,20 @@ class MultiHeadedAttentionSANM: Module {
     // FSMN block - depthwise convolution
     let fsmnBlock: Conv1d  // (nFeat, nFeat, kernel=11, groups=nFeat, padding=0)
 
+    // Dropout layer
+    let dropout: Dropout
+
     let leftPadding: Int   // (kernelSize - 1) / 2 + sanmShift
     let rightPadding: Int  // kernelSize - 1 - leftPadding
 
-    init(nHead: Int, inFeat: Int, nFeat: Int, kernelSize: Int = 11, sanmShift: Int = 0) {
+    init(nHead: Int, inFeat: Int, nFeat: Int, kernelSize: Int = 11, sanmShift: Int = 0, dropoutRate: Float = 0.0) {
         self.dK = nFeat / nHead
         self.h = nHead
         self.nFeat = nFeat
 
         self.linearQKV = Linear(inFeat, nFeat * 3, bias: true)
         self.linearOut = Linear(nFeat, nFeat, bias: true)
+        self.dropout = Dropout(p: dropoutRate)
 
         // Depthwise conv with no built-in padding
         self.fsmnBlock = Conv1d(
@@ -233,6 +237,15 @@ class MultiHeadedAttentionSANM: Module {
         // Residual connection
         x = x + inputs
 
+        // Apply dropout
+        x = dropout(x)
+
+        // Apply mask again if provided
+        if let mask = mask {
+            let m = mask.reshaped([b, -1, 1])
+            x = x * m
+        }
+
         return x
     }
 
@@ -267,8 +280,11 @@ class MultiHeadedAttentionSANM: Module {
             mask: attnMask
         )
 
+        // Apply dropout after attention
+        let contextDropped = dropout(context)
+
         // Reshape back: (batch, nHead, seq, dK) -> (batch, seq, nFeat)
-        let contextReshaped = context.transposed(0, 2, 1, 3).reshaped([batchSize, seqLen, nFeat])
+        let contextReshaped = contextDropped.transposed(0, 2, 1, 3).reshaped([batchSize, seqLen, nFeat])
 
         // Output projection
         let attOuts = linearOut(contextReshaped)
@@ -285,15 +301,17 @@ class MultiHeadedAttentionSANM: Module {
 class PositionwiseFeedForward: Module {
     let w1: Linear  // (dModel, dFF)
     let w2: Linear  // (dFF, dModel)
+    let dropout: Dropout
 
-    init(dModel: Int, dFF: Int) {
+    init(dModel: Int, dFF: Int, dropoutRate: Float = 0.0) {
         self.w1 = Linear(dModel, dFF, bias: true)
         self.w2 = Linear(dFF, dModel, bias: true)
+        self.dropout = Dropout(p: dropoutRate)
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        // ReLU activation (original FunASR uses ReLU, not GELU)
-        return w2(relu(w1(x)))
+        // ReLU activation with dropout (original FunASR uses ReLU, not GELU)
+        return w2(dropout(relu(w1(x))))
     }
 }
 ```
@@ -309,18 +327,20 @@ class EncoderLayerSANM: Module {
     let selfAttn: MultiHeadedAttentionSANM
     let norm2: LayerNorm
     let feedForward: PositionwiseFeedForward
+    let dropout: Dropout
 
-    init(inSize: Int, size: Int, nHead: Int, dFF: Int, kernelSize: Int = 11, sanmShift: Int = 0) {
+    init(inSize: Int, size: Int, nHead: Int, dFF: Int, kernelSize: Int = 11, sanmShift: Int = 0, dropoutRate: Float = 0.0) {
         self.inSize = inSize
         self.size = size
 
         self.norm1 = LayerNorm(dimensions: inSize)
         self.selfAttn = MultiHeadedAttentionSANM(
             nHead: nHead, inFeat: inSize, nFeat: size,
-            kernelSize: kernelSize, sanmShift: sanmShift
+            kernelSize: kernelSize, sanmShift: sanmShift, dropoutRate: dropoutRate
         )
         self.norm2 = LayerNorm(dimensions: size)
-        self.feedForward = PositionwiseFeedForward(dModel: size, dFF: dFF)
+        self.feedForward = PositionwiseFeedForward(dModel: size, dFF: dFF, dropoutRate: dropoutRate)
+        self.dropout = Dropout(p: dropoutRate)
     }
 
     func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil) -> MLXArray {
@@ -330,6 +350,7 @@ class EncoderLayerSANM: Module {
         // Pre-norm attention
         out = norm1(out)
         out = selfAttn(out, mask: mask)
+        out = dropout(out)  // Dropout after attention
 
         // Residual (only if dimensions match)
         if inSize == size {
@@ -373,7 +394,8 @@ class SenseVoiceEncoder: Module {
                 nHead: config.numHeads,
                 dFF: config.ffnDim,
                 kernelSize: config.kernelSize,
-                sanmShift: config.sanmShift
+                sanmShift: config.sanmShift,
+                dropoutRate: config.dropout
             )
         }
 
@@ -385,7 +407,8 @@ class SenseVoiceEncoder: Module {
                 nHead: config.numHeads,
                 dFF: config.ffnDim,
                 kernelSize: config.kernelSize,
-                sanmShift: config.sanmShift
+                sanmShift: config.sanmShift,
+                dropoutRate: config.dropout
             )
         }
 
@@ -397,7 +420,8 @@ class SenseVoiceEncoder: Module {
                 nHead: config.numHeads,
                 dFF: config.ffnDim,
                 kernelSize: config.kernelSize,
-                sanmShift: config.sanmShift
+                sanmShift: config.sanmShift,
+                dropoutRate: config.dropout
             )
         }
 
@@ -469,8 +493,9 @@ class MultiHeadedAttention: Module {
     let linearK: Linear
     let linearV: Linear
     let linearOut: Linear
+    let dropout: Dropout
 
-    init(nHead: Int, nFeat: Int) {
+    init(nHead: Int, nFeat: Int, dropoutRate: Float = 0.0) {
         self.dK = nFeat / nHead
         self.h = nHead
         self.nFeat = nFeat
@@ -479,6 +504,7 @@ class MultiHeadedAttention: Module {
         self.linearK = Linear(nFeat, nFeat, bias: true)
         self.linearV = Linear(nFeat, nFeat, bias: true)
         self.linearOut = Linear(nFeat, nFeat, bias: true)
+        self.dropout = Dropout(p: dropoutRate)
     }
 
     func callAsFunction(query: MLXArray, key: MLXArray, value: MLXArray, mask: MLXArray? = nil) -> MLXArray {
@@ -499,7 +525,10 @@ class MultiHeadedAttention: Module {
             mask: attnMask
         )
 
-        let output = context.transposed(0, 2, 1, 3).reshaped([batchSize, -1, nFeat])
+        // Apply dropout after attention
+        let contextDropped = dropout(context)
+
+        let output = contextDropped.transposed(0, 2, 1, 3).reshaped([batchSize, -1, nFeat])
         return linearOut(output)
     }
 }
@@ -513,28 +542,30 @@ class AdaptorEncoderLayer: Module {
     let feedForward: PositionwiseFeedForward
     let norm1: LayerNorm
     let norm2: LayerNorm
+    let dropout: Dropout
 
-    init(size: Int, nHead: Int, dFF: Int) {
-        self.selfAttn = MultiHeadedAttention(nHead: nHead, nFeat: size)
-        self.feedForward = PositionwiseFeedForward(dModel: size, dFF: dFF)
+    init(size: Int, nHead: Int, dFF: Int, dropoutRate: Float = 0.0) {
+        self.selfAttn = MultiHeadedAttention(nHead: nHead, nFeat: size, dropoutRate: dropoutRate)
+        self.feedForward = PositionwiseFeedForward(dModel: size, dFF: dFF, dropoutRate: dropoutRate)
         self.norm1 = LayerNorm(dimensions: size)
         self.norm2 = LayerNorm(dimensions: size)
+        self.dropout = Dropout(p: dropoutRate)
     }
 
     func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil) -> MLXArray {
         var out = x
 
-        // Pre-norm attention
+        // Pre-norm attention with dropout in residual
         let residual1 = out
         out = norm1(out)
         out = selfAttn(query: out, key: out, value: out, mask: mask)
-        out = residual1 + out
+        out = residual1 + dropout(out)
 
-        // Pre-norm feed-forward
+        // Pre-norm feed-forward with dropout in residual
         let residual2 = out
         out = norm2(out)
         out = feedForward(out)
-        out = residual2 + out
+        out = residual2 + dropout(out)
 
         return out
     }
@@ -565,7 +596,8 @@ class AudioAdaptor: Module {
                 AdaptorEncoderLayer(
                     size: config.llmDim,
                     nHead: config.attentionHeads,
-                    dFF: blockFFNDim
+                    dFF: blockFFNDim,
+                    dropoutRate: config.dropout
                 )
             }
         } else {
@@ -913,7 +945,156 @@ class Qwen3ForCausalLM: Module {
 
 ---
 
-## 5. Special Tokens
+## 5. Main Model Integration
+
+### 5.1 FunASRConfig (Top-level)
+
+```swift
+struct FunASRConfig {
+    // Audio processing
+    var sampleRate: Int = 16000
+    var nMels: Int = 80
+    var lfrM: Int = 7
+    var lfrN: Int = 6
+
+    // Component configs
+    var encoder: SenseVoiceEncoderConfig
+    var adaptor: AudioAdaptorConfig
+    var llm: Qwen3Config
+
+    // Special tokens
+    var sosToken: String = "<|startofspeech|>"
+    var eosToken: String = "<|endofspeech|>"
+    var imStartToken: String = "<|im_start|>"
+    var imEndToken: String = "<|im_end|>"
+
+    // Generation defaults
+    var maxTokens: Int = 512
+    var temperature: Float = 0.0
+}
+```
+
+### 5.2 STTOutput
+
+```swift
+struct STTOutput {
+    var text: String
+    var segments: [Segment]? = nil  // Not used (LLM-based model)
+    var language: String? = nil
+    var task: String? = nil
+    var duration: Float? = nil
+    var tokens: [Int]? = nil
+}
+```
+
+### 5.3 Task Types
+
+```swift
+let TASK_TRANSCRIBE = "transcribe"
+let TASK_TRANSLATE = "translate"
+```
+
+### 5.4 Embedding Merge Logic
+
+The audio embeddings are inserted between SOS and EOS tokens in the prompt:
+
+```swift
+func mergeEmbeddings(
+    inputIds: MLXArray,
+    audioEmbeddings: MLXArray,
+    sosTokenId: Int,
+    eosTokenId: Int
+) -> MLXArray {
+    // Get text embeddings from LLM
+    let textEmbeddings = llm.getInputEmbeddings()(inputIds)
+
+    let batchSize = inputIds.shape[0]
+    var allEmbeddings: [MLXArray] = []
+
+    for b in 0..<batchSize {
+        let ids = inputIds[b]
+        let textEmb = textEmbeddings[b]
+        let audioEmb = audioEmbeddings.ndim == 3 ? audioEmbeddings[b] : audioEmbeddings
+
+        // Find SOS and EOS positions
+        let sosMask = ids .== sosTokenId
+        let eosMask = ids .== eosTokenId
+        let sosPos = argmax(sosMask.asType(.int32)).item(Int.self)
+        let eosPos = argmax(eosMask.asType(.int32)).item(Int.self)
+
+        // Build merged: [text_before_sos, sos_emb, audio_emb, eos_emb, text_after_eos]
+        var parts: [MLXArray] = []
+
+        // Text before and including SOS
+        if sosPos >= 0 {
+            parts.append(textEmb[0..<(sosPos + 1)])
+        }
+
+        // Audio embeddings
+        parts.append(audioEmb)
+
+        // Text from EOS onwards
+        if eosPos >= 0 {
+            parts.append(textEmb[eosPos...])
+        }
+
+        let merged = concatenate(parts, axis: 0)
+        allEmbeddings.append(merged)
+    }
+
+    // Pad to same length
+    let maxLen = allEmbeddings.map { $0.shape[0] }.max()!
+    let padded = allEmbeddings.map { emb -> MLXArray in
+        if emb.shape[0] < maxLen {
+            let padding = MLXArray.zeros([maxLen - emb.shape[0], emb.shape[1]])
+            return concatenate([emb, padding], axis: 0)
+        }
+        return emb
+    }
+
+    return stack(padded, axis: 0)
+}
+```
+
+### 5.5 System Prompt Building
+
+```swift
+func buildSystemPrompt(
+    task: String,
+    language: String,
+    targetLanguage: String,
+    initialPrompt: String?
+) -> String {
+    let basePrompt: String
+
+    if task == TASK_TRANSLATE {
+        let targetLangName = SUPPORTED_LANGUAGES[targetLanguage] ?? targetLanguage
+        if language == "auto" {
+            basePrompt = "You are a speech translation assistant. Listen to the audio and translate the speech into \(targetLangName). Output only the translation, nothing else."
+        } else {
+            let sourceLangName = SUPPORTED_LANGUAGES[language] ?? language
+            basePrompt = "You are a speech translation assistant. The audio is in \(sourceLangName). Translate it into \(targetLangName). Output only the translation, nothing else."
+        }
+    } else {
+        // transcribe
+        if language == "auto" {
+            basePrompt = "You are a speech recognition assistant. Transcribe the audio accurately. Output only the transcription, nothing else."
+        } else {
+            let langName = SUPPORTED_LANGUAGES[language] ?? language
+            basePrompt = "You are a speech recognition assistant. The audio is in \(langName). Transcribe it accurately. Output only the transcription, nothing else."
+        }
+    }
+
+    if let prompt = initialPrompt {
+        return "\(prompt)\n\n\(basePrompt)"
+    }
+    return basePrompt
+}
+```
+
+---
+
+## 6. Special Tokens and Prompt Template
 
 | Token | Description |
 |-------|-------------|
@@ -934,7 +1115,7 @@ class Qwen3ForCausalLM: Module {
 
 ---
 
-## 6. Weight Conversion Notes
+## 7. Weight Conversion Notes
 
 ### Key Transformations
 
@@ -949,7 +1130,7 @@ Default 4-bit quantization with group size 64:
 
 ---
 
-## 7. Inference Pipeline
+## 8. Inference Pipeline
 
 ```swift
 func generate(audio: MLXArray) -> String {
@@ -993,7 +1174,7 @@ func generate(audio: MLXArray) -> String {
 
 ---
 
-## 8. Layer Summary
+## 9. Layer Summary
 
 | Component | Layers | Parameters |
 |-----------|--------|------------|
@@ -1007,7 +1188,7 @@ func generate(audio: MLXArray) -> String {
 
 ---
 
-## 9. Supported Languages
+## 10. Supported Languages
 
 | Code | Language |
 |------|----------|
@@ -1028,7 +1209,7 @@ func generate(audio: MLXArray) -> String {
 
 ---
 
-## 10. Source Files Reference
+## 11. Source Files Reference
 
 | File | Description |
 |------|-------------|
