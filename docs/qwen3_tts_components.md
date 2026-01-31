@@ -5,14 +5,15 @@ This document lists all components of the Qwen3-TTS model implementation in Pyth
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Configuration Classes](#configuration-classes)
-3. [Main Model](#main-model)
-4. [Talker Components](#talker-components)
-5. [Code Predictor Components](#code-predictor-components)
-6. [Speech Tokenizer Components](#speech-tokenizer-components)
-7. [Speaker Encoder Components](#speaker-encoder-components)
-8. [Utility Functions](#utility-functions)
-9. [Weight Shapes Reference](#weight-shapes-reference)
+2. [External Dependencies](#external-dependencies)
+3. [Configuration Classes](#configuration-classes)
+4. [Main Model](#main-model)
+5. [Talker Components](#talker-components)
+6. [Code Predictor Components](#code-predictor-components)
+7. [Speech Tokenizer Components](#speech-tokenizer-components)
+8. [Speaker Encoder Components](#speaker-encoder-components)
+9. [Utility Functions](#utility-functions)
+10. [Weight Shapes Reference](#weight-shapes-reference)
 
 ---
 
@@ -43,9 +44,75 @@ Text + Reference → [Talker Model] → Generated Codes → [Speech Tokenizer De
 
 ---
 
+## External Dependencies
+
+These are external modules used by Qwen3-TTS that would also need to be ported to Swift MLX.
+
+### From mlx_lm
+
+| Component | Import Path | Used By |
+|-----------|-------------|---------|
+| KVCache | `mlx_lm.models.cache.KVCache` | Talker, Code Predictor, Speech Tokenizer |
+
+**KVCache** is a key-value cache for efficient autoregressive generation. It stores past key/value states and provides:
+- `update_and_fetch(k, v)` - Update cache with new k/v and return full sequence
+- `offset` - Current position in the sequence
+
+### From mlx_audio.dsp
+
+| Component | Import Path | Used By |
+|-----------|-------------|---------|
+| mel_filters | `mlx_audio.dsp.mel_filters` | Main Model (mel spectrogram) |
+| stft | `mlx_audio.dsp.stft` | Main Model (mel spectrogram) |
+
+### From mlx_audio.codec.models.mimi
+
+Used by the Speech Tokenizer Encoder for ICL voice cloning:
+
+| Component | Import Path | Description |
+|-----------|-------------|-------------|
+| SeanetConfig | `mlx_audio.codec.models.mimi.modules.SeanetConfig` | Config for convolutional encoder |
+| SeanetEncoder | `mlx_audio.codec.models.mimi.modules.SeanetEncoder` | Convolutional audio encoder |
+| TransformerConfig | `mlx_audio.codec.models.mimi.modules.TransformerConfig` | Config for transformer |
+| ProjectedTransformer | `mlx_audio.codec.models.mimi.modules.ProjectedTransformer` | Transformer with projection |
+| ConvDownsample1d | `mlx_audio.codec.models.mimi.modules.ConvDownsample1d` | Frame rate downsampler |
+| SplitResidualVectorQuantizer | `mlx_audio.codec.models.mimi.modules.SplitResidualVectorQuantizer` | Split RVQ (as MimiSplitRVQ) |
+| _reset_kv_cache | `mlx_audio.codec.models.mimi.mimi._reset_kv_cache` | Helper to reset KV cache |
+
+### From mlx_audio.tts.models.base
+
+| Component | Import Path | Description |
+|-----------|-------------|-------------|
+| GenerationResult | `mlx_audio.tts.models.base.GenerationResult` | Dataclass for generation output |
+| BaseModelArgs | `mlx_audio.tts.models.base.BaseModelArgs` | Base config class |
+
+**GenerationResult** contains:
+- `audio: mx.array` - Generated audio waveform
+- `samples: int` - Number of audio samples
+- `sample_rate: int` - Audio sample rate
+- `segment_idx: int` - Segment index
+- `token_count: int` - Number of tokens generated
+- `audio_duration: str` - Formatted duration string
+- `real_time_factor: float` - RTF (audio_duration / processing_time)
+- `prompt: dict` - Token statistics
+- `audio_samples: dict` - Sample statistics
+- `processing_time_seconds: float` - Processing time
+- `peak_memory_usage: float` - Peak memory in GB
+
+---
+
 ## Configuration Classes
 
 **File:** `config.py`
+
+### Helper Function: filter_dict_for_dataclass()
+Filters a dictionary to only include keys that are valid dataclass fields.
+
+**Parameters:**
+- `cls: Type[T]` - Dataclass type
+- `data: Dict[str, Any]` - Dictionary to filter
+
+**Returns:** Filtered dictionary with only valid fields
 
 ### 1. ModelConfig (BaseModelArgs)
 Main configuration for Qwen3-TTS model.
@@ -433,16 +500,31 @@ Code predictor sub-model for multi-codebook prediction.
 
 ### Decoder Components
 
-#### 1. CausalConv1d (nn.Module)
-Causal 1D convolution with proper padding.
+#### 1. DepthwiseConvWeight (nn.Module)
+Container for depthwise conv weights to match PyTorch key structure.
+
+**Parameters:**
+- `out_channels: int`
+- `kernel_size: int`
+- `in_per_group: int`
+
+**Weights:**
+- `weight: [out_channels, kernel_size, in_per_group]`
+- `bias: [out_channels]`
+
+#### 2. CausalConv1d (nn.Module)
+Causal 1D convolution with proper padding. Supports grouped convolutions.
 
 **Parameters:**
 - `in_channels, out_channels, kernel_size, stride=1, dilation=1, groups=1`
 
 **Submodules:**
-- `conv: nn.Conv1d` or `DepthwiseConvWeight` (for grouped convs)
+- `conv: nn.Conv1d` (for groups=1) or `DepthwiseConvWeight` (for grouped/depthwise convs)
 
-#### 2. CausalTransposeConv1d (nn.Module)
+**Key Methods:**
+- `_get_extra_padding()` - Compute extra padding for alignment
+
+#### 3. CausalTransposeConv1d (nn.Module)
 Causal transposed convolution for upsampling.
 
 **Parameters:**
@@ -450,8 +532,9 @@ Causal transposed convolution for upsampling.
 
 **Submodules:**
 - `conv: nn.ConvTranspose1d`
+- `trim_right: int` - Amount to trim from right for causal behavior
 
-#### 3. SnakeBeta (nn.Module)
+#### 4. SnakeBeta (nn.Module)
 Snake activation: `x + (1/beta) * sin²(x * alpha)`
 
 **Parameters:**
@@ -461,7 +544,7 @@ Snake activation: `x + (1/beta) * sin²(x * alpha)`
 - `alpha: [channels]`
 - `beta: [channels]`
 
-#### 4. ConvNeXtBlock (nn.Module)
+#### 5. ConvNeXtBlock (nn.Module)
 ConvNeXt block for feature processing.
 
 **Parameters:**
@@ -474,37 +557,37 @@ ConvNeXt block for feature processing.
 - `pwconv2: nn.Linear(4*dim, dim)`
 - `gamma: [dim]` - Layer scale
 
-#### 5. DecoderRMSNorm (nn.Module)
+#### 6. DecoderRMSNorm (nn.Module)
 RMS normalization for decoder.
 
 **Weights:**
 - `weight: [hidden_size]`
 
-#### 6. LayerScale (nn.Module)
+#### 7. LayerScale (nn.Module)
 Layer scale for residual connections.
 
 **Weights:**
 - `scale: [channels]`
 
-#### 7. DecoderRotaryEmbedding (nn.Module)
+#### 8. DecoderRotaryEmbedding (nn.Module)
 Rotary embedding for decoder transformer.
 
 **Internal State:**
 - `_inv_freq: [dim/2]`
 
-#### 8. DecoderAttention (nn.Module)
+#### 9. DecoderAttention (nn.Module)
 Multi-head attention for decoder transformer.
 
 **Submodules:**
 - `q_proj, k_proj, v_proj, o_proj: nn.Linear`
 
-#### 9. DecoderMLP (nn.Module)
+#### 10. DecoderMLP (nn.Module)
 SwiGLU MLP for decoder.
 
 **Submodules:**
 - `gate_proj, up_proj, down_proj: nn.Linear`
 
-#### 10. DecoderTransformerLayer (nn.Module)
+#### 11. DecoderTransformerLayer (nn.Module)
 Transformer layer for decoder.
 
 **Submodules:**
@@ -515,7 +598,7 @@ Transformer layer for decoder.
 - `self_attn_layer_scale: LayerScale`
 - `mlp_layer_scale: LayerScale`
 
-#### 11. DecoderTransformer (nn.Module)
+#### 12. DecoderTransformer (nn.Module)
 Full transformer for decoder.
 
 **Submodules:**
@@ -525,7 +608,7 @@ Full transformer for decoder.
 - `input_proj: nn.Linear(latent_dim, hidden_size)`
 - `output_proj: nn.Linear(hidden_size, latent_dim)`
 
-#### 12. Vector Quantization Components
+#### 13. Vector Quantization Components
 
 **EuclideanCodebook:**
 - `embed: nn.Embedding(codebook_size, dim)`
@@ -546,7 +629,7 @@ Full transformer for decoder.
 - `rvq_first: ResidualVectorQuantizer` - Semantic quantizer
 - `rvq_rest: ResidualVectorQuantizer` - Acoustic quantizer
 
-#### 13. DecoderResidualUnit (nn.Module)
+#### 14. DecoderResidualUnit (nn.Module)
 Residual unit for decoder.
 
 **Submodules:**
@@ -555,15 +638,64 @@ Residual unit for decoder.
 - `act2: SnakeBeta`
 - `conv2: CausalConv1d(dim, dim, kernel_size=1)`
 
-#### 14. DecoderBlock (nn.Module)
+#### 15. DecoderBlockUpsample (nn.Module)
+Upsample layer wrapper for decoder block (causal transpose conv).
+
+**Parameters:**
+- `in_dim: int`
+- `out_dim: int`
+- `upsample_rate: int`
+
+**Submodules:**
+- `conv: nn.ConvTranspose1d(in_dim, out_dim, kernel_size=2*upsample_rate, stride=upsample_rate)`
+- `trim_right: int` - `kernel_size - upsample_rate` for causal trimming
+
+#### 16. DecoderBlock (nn.Module)
 Decoder block with upsampling.
 
-**Submodules (as block list):**
-- `block[0]: SnakeBeta` - Activation
-- `block[1]: DecoderBlockUpsample` - Transpose conv
-- `block[2-4]: DecoderResidualUnit` - 3 residual units (dilation 1, 3, 9)
+**Parameters:**
+- `config: Qwen3TTSTokenizerDecoderConfig`
+- `layer_idx: int`
 
-#### 15. Qwen3TTSSpeechTokenizerDecoder (nn.Module)
+**Submodules (as block list):**
+- `block[0]: SnakeBeta(in_dim)` - Activation
+- `block[1]: DecoderBlockUpsample(in_dim, out_dim, upsample_rate)` - Transpose conv
+- `block[2]: DecoderResidualUnit(out_dim, dilation=1)`
+- `block[3]: DecoderResidualUnit(out_dim, dilation=3)`
+- `block[4]: DecoderResidualUnit(out_dim, dilation=9)`
+
+#### 17. DecoderInitialConv (nn.Module)
+Initial convolution wrapper for decoder. Matches PyTorch key: `decoder.decoder.0.conv.*`
+
+**Parameters:**
+- `latent_dim: int`
+- `decoder_dim: int`
+- `kernel_size: int = 7`
+
+**Submodules:**
+- `conv: nn.Conv1d(latent_dim, decoder_dim, kernel_size)`
+
+#### 18. DecoderOutputSnake (nn.Module)
+Output SnakeBeta layer. Matches PyTorch key: `decoder.decoder.5.*`
+
+**Parameters:**
+- `channels: int`
+
+**Weights:**
+- `alpha: [channels]`
+- `beta: [channels]`
+
+#### 19. DecoderOutputConv (nn.Module)
+Output convolution layer. Matches PyTorch key: `decoder.decoder.6.conv.*`
+
+**Parameters:**
+- `channels: int`
+- `kernel_size: int = 7`
+
+**Submodules:**
+- `conv: nn.Conv1d(channels, 1, kernel_size)`
+
+#### 20. Qwen3TTSSpeechTokenizerDecoder (nn.Module)
 Full decoder for speech tokenizer.
 
 **Submodules:**
@@ -571,35 +703,52 @@ Full decoder for speech tokenizer.
 - `quantizer: SplitResidualVectorQuantizer`
 - `pre_conv: CausalConv1d(codebook_dim, latent_dim, kernel_size=3)`
 - `upsample: List[List[CausalTransposeConv1d, ConvNeXtBlock]]` - Upsampling blocks
-- `decoder: List` - [InitialConv, DecoderBlock×4, OutputSnake, OutputConv]
+- `decoder: List`:
+  - `decoder[0]: DecoderInitialConv`
+  - `decoder[1-4]: DecoderBlock` (4 blocks)
+  - `decoder[5]: DecoderOutputSnake`
+  - `decoder[6]: DecoderOutputConv`
+
+**Key Methods:**
+- `chunked_decode()` - Decode in chunks for long sequences
 
 ### Encoder Components
 
-#### 16. Qwen3TTSSpeechTokenizerEncoder (nn.Module)
+#### 21. Qwen3TTSSpeechTokenizerEncoder (nn.Module)
 Encoder using Mimi components (for ICL voice cloning).
 
+**Parameters:**
+- `config: Qwen3TTSTokenizerEncoderConfig`
+
 **Submodules:**
-- `encoder: SeanetEncoder` - Convolutional encoder
-- `encoder_transformer: ProjectedTransformer` - Transformer
-- `downsample: ConvDownsample1d` - Frame rate downsample
-- `quantizer: MimiSplitRVQ` - Split RVQ quantizer
+- `encoder: SeanetEncoder` - Convolutional encoder (from Mimi)
+- `encoder_transformer: ProjectedTransformer` - Transformer (from Mimi)
+- `downsample: ConvDownsample1d` - Frame rate downsample (from Mimi)
+- `quantizer: MimiSplitRVQ` - Split RVQ quantizer (from Mimi)
+- `encoder_cache: List[KVCache]` - Cached KV states
 
 **Key Methods:**
-- `encode(audio) -> codes`
+- `encode(audio) -> codes` - Encode audio waveform to codes
 
 ### Full Tokenizer
 
-#### 17. Qwen3TTSSpeechTokenizer (nn.Module)
+#### 22. Qwen3TTSSpeechTokenizer (nn.Module)
 Full speech tokenizer (encoder + decoder).
+
+**Parameters:**
+- `config: Qwen3TTSTokenizerConfig`
 
 **Submodules:**
 - `decoder: Qwen3TTSSpeechTokenizerDecoder`
 - `encoder_model: Qwen3TTSSpeechTokenizerEncoder` (optional, for ICL)
 
 **Key Methods:**
-- `encode(audio) -> codes` - Audio to codes
+- `encode(audio) -> codes` - Audio to codes (requires encoder)
 - `decode(codes) -> (audio, audio_lengths)` - Codes to audio
 - `has_encoder` - Property indicating ICL support
+
+**Static Methods:**
+- `sanitize(weights)` - Convert PyTorch weights to MLX format
 
 ---
 
@@ -668,9 +817,9 @@ ECAPA-TDNN speaker encoder.
 
 ## Utility Functions
 
-**File:** `qwen3_tts.py`
+### From qwen3_tts.py
 
-### mel_spectrogram()
+#### mel_spectrogram()
 Compute mel spectrogram from audio waveform.
 
 **Parameters:**
@@ -685,20 +834,69 @@ Compute mel spectrogram from audio waveform.
 
 **Returns:** `[batch, frames, n_mels]`
 
-### check_array_shape_qwen3()
-Check if Conv1d weights are in MLX format.
+#### check_array_shape_qwen3()
+Check if Conv1d weights are already in MLX format.
 
-### rotate_half() (in talker.py)
-Rotates half the hidden dims for RoPE.
+**Parameters:**
+- `arr: mx.array` - Array to check (must be 3D)
 
-### apply_rotary_pos_emb() (in talker.py)
-Applies RoPE to query and key tensors.
+**Returns:** `bool` - True if MLX format, False if PyTorch format
 
-### apply_multimodal_rotary_pos_emb() (in talker.py)
-Applies MRoPE to query and key tensors.
+#### format_duration()
+Format duration in seconds as HH:MM:SS.mmm string.
 
-### reflect_pad_1d() (in speaker_encoder.py)
-Apply reflect padding to time dimension.
+**Parameters:**
+- `seconds: float` - Duration in seconds
+
+**Returns:** Formatted string (e.g., "00:01:23.456")
+
+### From talker.py
+
+#### rotate_half()
+Rotates half the hidden dims of the input for RoPE.
+
+**Parameters:**
+- `x: mx.array` - Input tensor `[..., dim]`
+
+**Returns:** Tensor with first and second halves swapped and negated
+
+#### apply_rotary_pos_emb()
+Applies standard Rotary Position Embedding to query and key tensors.
+
+**Parameters:**
+- `q, k: mx.array` - Query and key tensors `[batch, heads, seq, head_dim]`
+- `cos, sin: mx.array` - Position embeddings `[batch, seq, head_dim]`
+
+**Returns:** Tuple of rotated (q, k)
+
+#### apply_multimodal_rotary_pos_emb()
+Applies Multimodal RoPE (MRoPE) to query and key tensors.
+
+**Parameters:**
+- `q, k: mx.array` - Query and key tensors
+- `cos, sin: mx.array` - Combined MRoPE position embeddings
+- `unsqueeze_dim: int = 1` - Dimension to unsqueeze for broadcasting
+
+**Returns:** Tuple of rotated (q, k)
+
+### From speech_tokenizer.py
+
+#### rotate_half() (duplicate)
+Same as talker.py version, duplicated for decoder transformer.
+
+#### apply_rotary_pos_emb() (duplicate)
+Same as talker.py version, duplicated for decoder transformer.
+
+### From speaker_encoder.py
+
+#### reflect_pad_1d()
+Apply reflect padding to the time dimension (axis=1) in NLC format.
+
+**Parameters:**
+- `x: mx.array` - Input tensor `[batch, time, channels]`
+- `pad: int` - Number of samples to pad on each side
+
+**Returns:** Padded tensor `[batch, time + 2*pad, channels]`
 
 ---
 
