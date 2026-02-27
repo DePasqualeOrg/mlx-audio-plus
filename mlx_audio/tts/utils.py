@@ -27,6 +27,7 @@ MODEL_REMAPPING = {
     "vibevoice_streaming": "vibevoice",
     "chatterbox_turbo": "chatterbox_turbo",
     "soprano": "soprano",
+    "echo_tts": "echo_tts",
 }
 
 # Models that require custom conversion from PyTorch source weights
