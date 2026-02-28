@@ -31,7 +31,7 @@ dependencies = [
     "soundfile>=0.13.1",
     "pyloudnorm>=0.1.1",
     "librosa==0.11.0",
-    "mlx-audio[all]", # TODO: Reduce deps
+ #   "mlx-audio[all]", # TODO: Reduce deps
 ]
 
 [project.optional-dependencies]
