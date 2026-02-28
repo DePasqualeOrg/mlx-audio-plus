@@ -1170,7 +1170,11 @@ class Model(nn.Module):
             mx.clear_cache()
 
         # Tokenize reference text (for zero-shot mode)
+        # CosyVoice3 requires the format: "You are a helpful assistant.<|endofprompt|>ref text"
         if ref_text:
+            _SYSTEM_PREFIX = "You are a helpful assistant.<|endofprompt|>"
+            if not ref_text.startswith(_SYSTEM_PREFIX):
+                ref_text = _SYSTEM_PREFIX + ref_text
             prompt_text_tokens = self._tokenizer.encode(
                 ref_text, add_special_tokens=False
             )
@@ -1239,7 +1243,15 @@ class Model(nn.Module):
                     min_token_text_ratio=2.0,
                 )
             elif instruct_text:
-                instruct_with_marker = instruct_text + "<|endofprompt|>"
+                # CosyVoice3 requires the format:
+                # "You are a helpful assistant. instruction<|endofprompt|>"
+                _INSTRUCT_PREFIX = "You are a helpful assistant. "
+                _END_MARKER = "<|endofprompt|>"
+                if not instruct_text.startswith(_INSTRUCT_PREFIX):
+                    instruct_text = _INSTRUCT_PREFIX + instruct_text
+                if not instruct_text.endswith(_END_MARKER):
+                    instruct_text = instruct_text + _END_MARKER
+                instruct_with_marker = instruct_text
                 instruct_tokens = self._tokenizer.encode(
                     instruct_with_marker, add_special_tokens=False
                 )
@@ -1261,6 +1273,17 @@ class Model(nn.Module):
                     min_token_text_ratio=2.0,
                 )
             else:
+                # CosyVoice3 cross-lingual mode requires the format:
+                # "You are a helpful assistant.<|endofprompt|>text"
+                _SYSTEM_PREFIX = "You are a helpful assistant.<|endofprompt|>"
+                if not text.startswith(_SYSTEM_PREFIX):
+                    text = _SYSTEM_PREFIX + text
+                cross_lingual_tokens = self._tokenizer.encode(
+                    text, add_special_tokens=False
+                )
+                text_array = mx.array([cross_lingual_tokens], dtype=mx.int32)
+                text_len = mx.array([len(cross_lingual_tokens)], dtype=mx.int32)
+
                 audio = self._model.synthesize_cross_lingual(
                     text=text_array,
                     text_len=text_len,
