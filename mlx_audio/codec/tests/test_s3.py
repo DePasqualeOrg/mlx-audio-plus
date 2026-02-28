@@ -2,8 +2,8 @@ import unittest
 
 import mlx.core as mx
 
-from ..models.s3 import S3TokenizerV2
-from ..models.s3.utils import log_mel_spectrogram
+from ..models.s3tokenizer import S3TokenizerV2
+from ..models.s3tokenizer.utils import log_mel_spectrogram
 
 
 class TestS3TokenizerV2(unittest.TestCase):
