@@ -1080,6 +1080,11 @@ class Model(nn.Module):
         if self._tokenizer is None:
             raise RuntimeError("Text tokenizer not loaded")
 
+        # CosyVoice3 requires specific text format depending on the mode:
+        # - Cross-lingual mode: text must be "You are a helpful assistant.<|endofprompt|>实际文本"
+        # - Zero-shot mode: ref_text must be "You are a helpful assistant.<|endofprompt|>参考音频文本"
+        # - Instruct mode: instruct_text must be "You are a helpful assistant. 指令内容<|endofprompt|>"
+        # See official example.py for reference
         text_tokens = self._tokenizer.encode(text, add_special_tokens=False)
         text_array = mx.array([text_tokens], dtype=mx.int32)
         text_len = mx.array([len(text_tokens)], dtype=mx.int32)
@@ -1170,9 +1175,15 @@ class Model(nn.Module):
             mx.clear_cache()
 
         # Tokenize reference text (for zero-shot mode)
+        # CosyVoice3 requires format: "You are a helpful assistant.<|endofprompt|>参考音频文本"
         if ref_text:
+            # Add required prefix if not already present
+            if not ref_text.startswith("You are a helpful assistant.<|endofprompt|>"):
+                formatted_ref_text = f"You are a helpful assistant.<|endofprompt|>{ref_text}"
+            else:
+                formatted_ref_text = ref_text
             prompt_text_tokens = self._tokenizer.encode(
-                ref_text, add_special_tokens=False
+                formatted_ref_text, add_special_tokens=False
             )
             prompt_text = mx.array([prompt_text_tokens], dtype=mx.int32)
             prompt_text_len = mx.array([len(prompt_text_tokens)], dtype=mx.int32)
@@ -1239,7 +1250,13 @@ class Model(nn.Module):
                     min_token_text_ratio=2.0,
                 )
             elif instruct_text:
-                instruct_with_marker = instruct_text + "<|endofprompt|>"
+                # CosyVoice3 instruct mode requires format: "You are a helpful assistant. 指令内容<|endofprompt|>"
+                if not instruct_text.startswith("You are a helpful assistant."):
+                    instruct_with_marker = f"You are a helpful assistant. {instruct_text}<|endofprompt|>"
+                elif not instruct_text.endswith("<|endofprompt|>"):
+                    instruct_with_marker = instruct_text + "<|endofprompt|>"
+                else:
+                    instruct_with_marker = instruct_text
                 instruct_tokens = self._tokenizer.encode(
                     instruct_with_marker, add_special_tokens=False
                 )
@@ -1261,9 +1278,21 @@ class Model(nn.Module):
                     min_token_text_ratio=2.0,
                 )
             else:
+                # Cross-lingual mode: text must start with "You are a helpful assistant.<|endofprompt|>"
+                # Format: "You are a helpful assistant.<|endofprompt|>实际要合成的文本"
+                if not text.startswith("You are a helpful assistant.<|endofprompt|>"):
+                    formatted_text = f"You are a helpful assistant.<|endofprompt|>{text}"
+                else:
+                    formatted_text = text
+                cross_lingual_text_tokens = self._tokenizer.encode(
+                    formatted_text, add_special_tokens=False
+                )
+                cross_lingual_text_array = mx.array([cross_lingual_text_tokens], dtype=mx.int32)
+                cross_lingual_text_len = mx.array([len(cross_lingual_text_tokens)], dtype=mx.int32)
+                
                 audio = self._model.synthesize_cross_lingual(
-                    text=text_array,
-                    text_len=text_len,
+                    text=cross_lingual_text_array,
+                    text_len=cross_lingual_text_len,
                     prompt_speech_token=prompt_speech_token,
                     prompt_speech_token_len=prompt_speech_token_len,
                     prompt_mel=prompt_mel,
