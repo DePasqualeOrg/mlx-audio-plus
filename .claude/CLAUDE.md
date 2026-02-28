@@ -2,28 +2,8 @@
 
 This project includes speech-to-text, text-to-speech, and speech-to-speech models in MLX running on Apple Silicon.
 
-## Project Structure
+## Key entry points
 
-```
-mlx-audio-plus/
-├── mlx_audio/                 # Main package
-│   ├── convert.py             # Universal model conversion (PyTorch → MLX)
-│   ├── tts/                   # Text-to-speech
-│   │   ├── generate.py        # CLI and API entry point
-│   │   └── models/            # Chatterbox, CosyVoice2/3, Kokoro, Bark, etc.
-│   ├── stt/                   # Speech-to-text
-│   │   ├── generate.py        # CLI entry point
-│   │   └── models/            # Whisper, FunASR, Parakeet, Voxtral, etc.
-│   ├── sts/                   # Speech-to-speech
-│   │   └── voice_pipeline.py  # Async pipeline (STT → LLM → TTS)
-│   ├── codec/                 # Audio codecs (SNAC, Vocos, EnCodec, etc.)
-│   └── server.py              # FastAPI inference server
-├── docs/                      # Model documentation
-├── examples/                  # Usage examples
-└── tests/                     # Test suites
-```
-
-**Key entry points:**
 - `mlx_audio.tts.generate` - TTS inference CLI/API
 - `mlx_audio.stt.generate` - STT inference CLI
 - `mlx_audio.convert` - Model conversion
