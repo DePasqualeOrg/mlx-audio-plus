@@ -1,4 +1,5 @@
 import argparse
+import inspect
 import os
 import sys
 from typing import Optional, Tuple, Union
@@ -13,6 +14,12 @@ from mlx_audio.utils import load_audio
 
 from .audio_player import AudioPlayer
 from .utils import load_model
+
+
+def _get_model_type_name(model) -> Optional[str]:
+    """Return model_type whether the model exposes it as a method or attribute."""
+    model_type = getattr(model, "model_type", None)
+    return model_type() if callable(model_type) else model_type
 
 
 def detect_speech_boundaries(
@@ -124,6 +131,7 @@ def generate_audio(
     play: bool = False,
     verbose: bool = True,
     temperature: float = 0.7,
+    seed: Optional[int] = None,
     stream: bool = False,
     streaming_interval: float = 2.0,
     **kwargs,
@@ -137,6 +145,7 @@ def generate_audio(
     - voice (str): The voice style to use (also used as speaker for Qwen3-TTS models).
     - instruct (str): Instruction for emotion/style (CustomVoice) or voice description (VoiceDesign).
     - temperature (float): The temperature for the model.
+    - seed (int | None): Optional MLX RNG seed for reproducible sampling.
     - speed (float): Playback speed multiplier.
     - lang_code (str): The language code.
     - ref_audio (mx.array): Reference audio you would like to clone the voice from.
@@ -159,14 +168,15 @@ def generate_audio(
         if model is None:
             raise ValueError("Model path or model instance must be provided.")
 
-        if stt_model is None and (ref_audio and ref_text is None):
-            raise ValueError(
-                "STT model path or model instance must be provided when ref_text is missing."
-            )
-
         if isinstance(model, str):
             # Load model
             model = load_model(model_path=model)
+
+        generate_signature = inspect.signature(model.generate)
+        model_type = _get_model_type_name(model)
+        supports_ref_text = "ref_text" in generate_signature.parameters
+        supports_instruct_text = "instruct_text" in generate_signature.parameters
+        supports_stt_model = "stt_model" in generate_signature.parameters
 
         # Load reference audio for voice matching if specified
         if ref_audio:
@@ -174,26 +184,28 @@ def generate_audio(
                 raise FileNotFoundError(f"Reference audio file not found: {ref_audio}")
 
             normalize = False
-            if hasattr(model, "model_type") and model.model_type == "spark":
+            if model_type == "spark":
                 normalize = True
 
             ref_audio = load_audio(
                 ref_audio, sample_rate=model.sample_rate, volume_normalize=normalize
             )
-            if not ref_text:
-                import inspect
+            if not ref_text and supports_ref_text and not supports_stt_model:
+                if stt_model is None:
+                    raise ValueError(
+                        "STT model path or model instance must be provided "
+                        "when ref_text is missing."
+                    )
+                print("Ref_text not found. Transcribing ref_audio...")
+                from mlx_audio.stt import load as load_stt_model
 
-                if "ref_text" in inspect.signature(model.generate).parameters:
-                    print("Ref_text not found. Transcribing ref_audio...")
-                    from mlx_audio.stt import load as load_stt_model
+                if isinstance(stt_model, str):
+                    stt_model = load_stt_model(stt_model)
+                ref_text = stt_model.generate(ref_audio).text
 
-                    if isinstance(stt_model, str):
-                        stt_model = load_stt_model(stt_model)
-                    ref_text = stt_model.generate(ref_audio).text
-
-                    del stt_model
-                    mx.clear_cache()
-                    print(f"\033[94mRef_text:\033[0m {ref_text}")
+                del stt_model
+                mx.clear_cache()
+                print(f"\033[94mRef_text:\033[0m {ref_text}")
 
         # Load AudioPlayer
         player = AudioPlayer(sample_rate=model.sample_rate) if play else None
@@ -227,9 +239,18 @@ def generate_audio(
             verbose=verbose,
             stream=stream,
             streaming_interval=streaming_interval,
-            instruct=instruct,
             **kwargs,
         )
+        if seed is not None:
+            mx.random.seed(seed)
+        if "seed" in generate_signature.parameters:
+            gen_kwargs["seed"] = seed
+        if supports_instruct_text:
+            gen_kwargs["instruct_text"] = instruct
+        else:
+            gen_kwargs["instruct"] = instruct
+        if supports_stt_model:
+            gen_kwargs["stt_model"] = stt_model
 
         results = model.generate(**gen_kwargs)
 
@@ -382,6 +403,12 @@ def parse_args():
     )
     parser.add_argument(
         "--temperature", type=float, default=0.7, help="Temperature for the model"
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Optional MLX RNG seed for reproducible sampling",
     )
     parser.add_argument("--top_p", type=float, default=0.9, help="Top-p for the model")
     parser.add_argument("--top_k", type=int, default=50, help="Top-k for the model")
