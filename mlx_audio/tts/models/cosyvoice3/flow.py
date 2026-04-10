@@ -279,7 +279,7 @@ class CausalMaskedDiffWithDiT(nn.Module):
 
     def __init__(
         self,
-        input_size: int = 512,
+        input_size: int = 80,
         output_size: int = 80,
         spk_embed_dim: int = 192,
         vocab_size: int = 6561,
@@ -420,7 +420,7 @@ class CausalMaskedDiffWithDiT(nn.Module):
 
 
 def build_flow_model(
-    input_size: int = 512,
+    input_size: int = 80,
     output_size: int = 80,
     spk_embed_dim: int = 192,
     vocab_size: int = 6561,

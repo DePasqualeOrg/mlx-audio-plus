@@ -184,19 +184,13 @@ class CosyVoice3LM(nn.Module):
         Returns:
             Sampled token ID
         """
-        num_trials, max_trials = 0, 100
-        while True:
-            top_ids = self.sampling(weighted_scores, decoded_tokens, sampling)
-            # If not ignoring EOS, or sampled token is valid speech token, accept it
-            if (not ignore_eos) or (top_ids < self.speech_token_size):
-                break
-            num_trials += 1
-            if num_trials > max_trials:
-                raise RuntimeError(
-                    f"sampling reaches max_trials {max_trials} and still get special token "
-                    "when ignore_eos is True, check your input!"
-                )
-        return top_ids
+        if ignore_eos:
+            # Matches cosyvoice/llm/llm.py:sampling_ids in the original
+            # PyTorch implementation, which masks only the stop index at
+            # speech_token_size during the minimum-length phase.
+            weighted_scores = weighted_scores + 0
+            weighted_scores[self.speech_token_size] = -float("inf")
+        return self.sampling(weighted_scores, decoded_tokens, sampling)
 
     def inference(
         self,
@@ -521,6 +515,8 @@ def ras_sampling(
         rep_num = sum(1 for t in recent_tokens if t == top_ids)
 
         if rep_num >= win_size * tau_r:
+            logits = logits + 0
+            logits[top_ids] = -float("inf")
             probs = mx.softmax(logits)
             top_ids = int(mx.random.categorical(mx.log(probs)).item())
 

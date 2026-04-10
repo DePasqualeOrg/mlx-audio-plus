@@ -12,16 +12,22 @@ This module provides the main CosyVoice3 model class that integrates:
 
 import logging
 import math
+import re
+import unicodedata
 from pathlib import Path
 from typing import Generator, List, Optional, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
+import numpy as np
+from num2words import num2words
+from scipy.signal import resample_poly
 
 from .config import CosyVoice3Config, ModelConfig
 from .flow import CausalMaskedDiffWithDiT, build_flow_model
 from .hifigan import CausalHiFTGenerator
 from .llm import CosyVoice3LM, Qwen2Encoder, ras_sampling, top_k_sampling
+from .special_tokens import COSYVOICE3_TOKENIZER_SPECIAL_TOKENS
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +35,98 @@ logger = logging.getLogger(__name__)
 # These are filtered during streaming to avoid excessive pauses
 SILENT_TOKENS = {1, 2, 28, 29, 55, 248, 494, 2241, 2242, 2322, 2323}
 MAX_SILENT_TOKEN_NUM = 5
+MAX_PROMPT_AUDIO_SECONDS = 30
+SYSTEM_PROMPT = "You are a helpful assistant."
+END_OF_PROMPT = "<|endofprompt|>"
+ZERO_SHOT_PROMPT_PREFIX = f"{SYSTEM_PROMPT}{END_OF_PROMPT}"
+INSTRUCT_PROMPT_PREFIX = f"{SYSTEM_PROMPT} "
+
+
+def _contains_chinese(text: str) -> bool:
+    """Match the original frontend's Chinese/non-Chinese split."""
+    return any("\u4e00" <= char <= "\u9fff" for char in text)
+
+
+def _is_only_punctuation(text: str) -> bool:
+    """Return True when a string contains no letters or numbers."""
+    trimmed = text.strip()
+    if not trimmed:
+        return True
+    return all(unicodedata.category(char)[0] in {"P", "S"} for char in trimmed)
+
+
+def _resample_audio(audio: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
+    """Band-limited resampling closer to torchaudio's default path than FFT resample."""
+    audio = np.asarray(audio, dtype=np.float32)
+    if from_rate == to_rate:
+        return audio
+
+    gcd = math.gcd(from_rate, to_rate)
+    up = to_rate // gcd
+    down = from_rate // gcd
+    return resample_poly(audio, up, down).astype(np.float32, copy=False)
+
+
+def _replace_blank(text: str) -> str:
+    """Match the original frontend's blank handling between Chinese chars."""
+    out = []
+    for index, char in enumerate(text):
+        if char != " ":
+            out.append(char)
+            continue
+
+        if index == 0 or index == len(text) - 1:
+            continue
+
+        prev_char = text[index - 1]
+        next_char = text[index + 1]
+        if (
+            prev_char.isascii()
+            and prev_char != " "
+            and next_char.isascii()
+            and next_char != " "
+        ):
+            out.append(char)
+    return "".join(out)
+
+
+def _replace_corner_mark(text: str) -> str:
+    """Match the original Chinese text frontend substitutions."""
+    return text.replace("²", "平方").replace("³", "立方")
+
+
+def _remove_bracket(text: str) -> str:
+    """Remove bracket-like characters the same way as the original frontend."""
+    return (
+        text.replace("（", "")
+        .replace("）", "")
+        .replace("【", "")
+        .replace("】", "")
+        .replace("`", "")
+        .replace("——", " ")
+    )
+
+
+def _spell_out_number(text: str) -> str:
+    """Spell out digit runs like cosyvoice/utils/frontend_utils.py:spell_out_number."""
+    parts: List[str] = []
+    start: Optional[int] = None
+
+    for index, char in enumerate(text):
+        if char.isdigit():
+            if start is None:
+                start = index
+            continue
+
+        if start is not None:
+            parts.append(num2words(int(text[start:index])))
+            start = None
+        parts.append(char)
+
+    if start is not None:
+        parts.append(num2words(int(text[start:])))
+
+    return "".join(parts)
 
 
 class CosyVoice3(nn.Module):
@@ -517,7 +615,8 @@ class CosyVoice3(nn.Module):
         Streaming speech synthesis with chunked output.
 
         Generates audio in chunks as tokens are produced, reducing latency.
-        This implementation closely follows PyTorch CosyVoice3Model.tts().
+        This implementation closely follows the original PyTorch
+        cosyvoice/cli/model.py CosyVoice3Model.tts() path.
 
         Args:
             text: Text token IDs (1, T)
@@ -554,6 +653,8 @@ class CosyVoice3(nn.Module):
         token_offset = 0
         mel_cache: Optional[mx.array] = None
         speech_offset = 0
+        current_chunk_size = chunk_size
+        max_chunk_size = 4 * chunk_size
 
         # Silent token filtering state
         cur_silent_token_num = 0
@@ -580,9 +681,12 @@ class CosyVoice3(nn.Module):
 
             speech_tokens.append(token)
 
-            # Calculate current chunk size (first chunk includes padding)
+            # The original PyTorch CosyVoice3 CLI path increases the token hop
+            # length as 25 -> 50 -> 100 (capped at 4x the base chunk size).
             this_chunk_size = (
-                chunk_size + prompt_token_pad if token_offset == 0 else chunk_size
+                current_chunk_size + prompt_token_pad
+                if token_offset == 0
+                else current_chunk_size
             )
 
             # Process chunk when enough tokens accumulated
@@ -629,6 +733,7 @@ class CosyVoice3(nn.Module):
 
                 # Advance token offset
                 token_offset += this_chunk_size
+                current_chunk_size = min(max_chunk_size, current_chunk_size * 2)
 
         # Final chunk - process remaining tokens
         # Note: PyTorch uses streaming=False for final chunk (full attention)
@@ -926,31 +1031,21 @@ class Model(nn.Module):
             if has_tokenizer:
                 from transformers import AutoTokenizer
 
-                self._tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_path))
+                # Newer transformers versions require an explicit regex fix for
+                # this tokenizer family to preserve the original text
+                # segmentation behavior. Fall back cleanly when running on an
+                # older transformers version that does not expose the flag.
+                try:
+                    self._tokenizer = AutoTokenizer.from_pretrained(
+                        str(tokenizer_path),
+                        fix_mistral_regex=True,
+                    )
+                except TypeError:
+                    self._tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_path))
 
-                # Add CosyVoice3-specific special tokens
-                special_tokens = {
-                    "additional_special_tokens": [
-                        "<|endofprompt|>",
-                        "[breath]",
-                        "<strong>",
-                        "</strong>",
-                        "[noise]",
-                        "[laughter]",
-                        "[cough]",
-                        "[clucking]",
-                        "[accent]",
-                        "[quick_breath]",
-                        "<laughter>",
-                        "</laughter>",
-                        "[hissing]",
-                        "[sigh]",
-                        "[vocalized-noise]",
-                        "[lipsmack]",
-                        "[mn]",
-                    ]
-                }
-                self._tokenizer.add_special_tokens(special_tokens)
+                # Match the original PyTorch `CosyVoice3Tokenizer`, which
+                # registers the full CosyVoice3 text special-token inventory.
+                self._tokenizer.add_special_tokens(COSYVOICE3_TOKENIZER_SPECIAL_TOKENS)
             else:
                 raise RuntimeError(
                     f"No tokenizer found in {tokenizer_path}. "
@@ -997,6 +1092,104 @@ class Model(nn.Module):
                 else:
                     self._speaker_encoder = CAMPlusSpeakerEncoder(str(model_path))
 
+    def _tokenize_text(self, text: str) -> List[int]:
+        """Tokenize text with the CosyVoice3 Qwen2 tokenizer."""
+        if self._tokenizer is None:
+            raise RuntimeError("Text tokenizer not loaded")
+        return self._tokenizer.encode(text, add_special_tokens=False)
+
+    def _normalize_text(self, text: str) -> str:
+        """
+        Match the standard original PyTorch frontend's lightweight normalization.
+
+        This keeps the control-tag bypass behavior and applies the normalization
+        steps that do not depend on optional external frontends such as wetext
+        or ttsfrd.
+        """
+        trimmed = text.strip()
+        if not trimmed:
+            return trimmed
+
+        if "<|" in trimmed and "|>" in trimmed:
+            return trimmed
+
+        if _contains_chinese(trimmed):
+            normalized = trimmed.replace("\n", "")
+            normalized = _replace_blank(normalized)
+            normalized = _replace_corner_mark(normalized)
+            normalized = normalized.replace(".", "。")
+            normalized = normalized.replace(" - ", "，")
+            normalized = _remove_bracket(normalized)
+            normalized = re.sub(r"[，,、]+$", "。", normalized)
+            return normalized
+
+        return _spell_out_number(trimmed)
+
+    def _split_text_for_inference(self, text: str) -> List[str]:
+        """
+        Match the original PyTorch frontend's sentence splitting strategy.
+
+        The standard frontend normalizes and splits text before tokenization so
+        the LLM sees shorter sentence groups instead of one long paragraph.
+        This mirrors the same chunking logic used in the Swift port.
+        """
+        normalized_text = self._normalize_text(text)
+        if not normalized_text:
+            return []
+
+        if "<|" in normalized_text and "|>" in normalized_text:
+            return [normalized_text]
+
+        is_chinese = _contains_chinese(normalized_text)
+        punctuation = (
+            {"。", "？", "！", "；", "：", "、", ".", "?", "!", ";"}
+            if is_chinese
+            else {".", "?", "!", ";", ":"}
+        )
+
+        normalized = normalized_text
+        if normalized[-1] not in punctuation:
+            normalized += "。" if is_chinese else "."
+
+        utterances: List[str] = []
+        start = 0
+        for index, character in enumerate(normalized):
+            if character not in punctuation:
+                continue
+
+            end = index + 1
+            if end < len(normalized) and normalized[end] in {'"', "”"}:
+                end += 1
+            utterance = normalized[start:end]
+            if utterance.strip():
+                utterances.append(utterance)
+            start = end
+
+        def chunk_length(value: str) -> int:
+            if not value:
+                return 0
+            if is_chinese:
+                return len(value)
+            return len(self._tokenize_text(value))
+
+        final_chunks: List[str] = []
+        current_chunk = ""
+        for utterance in utterances:
+            combined = current_chunk + utterance
+            if chunk_length(combined) > 80 and chunk_length(current_chunk) > 60:
+                if not _is_only_punctuation(current_chunk):
+                    final_chunks.append(current_chunk)
+                current_chunk = ""
+            current_chunk += utterance
+
+        if current_chunk:
+            if chunk_length(current_chunk) < 20 and final_chunks:
+                final_chunks[-1] += current_chunk
+            elif not _is_only_punctuation(current_chunk):
+                final_chunks.append(current_chunk)
+
+        return final_chunks or [normalized_text]
+
     def generate(
         self,
         text: str,
@@ -1008,11 +1201,12 @@ class Model(nn.Module):
         speed: float = 1.0,
         lang_code: str = "a",
         temperature: float = 0.7,
+        seed: Optional[int] = None,
         max_tokens: int = 2000,
         verbose: bool = True,
         stream: bool = False,
         streaming_interval: float = 2.0,
-        stt_model: Optional[str] = "mlx-community/whisper-large-v3-turbo-4bit",
+        stt_model: Optional[str] = None,
         **kwargs,
     ):
         """
@@ -1024,35 +1218,33 @@ class Model(nn.Module):
         3. Cross-lingual: ref_audio only - Clone voice for different language
         4. Instruct: ref_audio + instruct_text - Control style with instructions
 
-        When ref_text is not provided and stt_model is set, the reference audio will
-        be automatically transcribed using Whisper for best quality zero-shot cloning.
-        Set stt_model=None to skip transcription and use cross-lingual mode instead.
+        CosyVoice3 follows the original PyTorch frontend split:
+        - Zero-shot requires caller-supplied ref_text that matches the reference clip
+        - Cross-lingual uses ref_audio only and is the default when ref_text is omitted
+        - Reference audio longer than 30 seconds is rejected instead of clipped
 
         Args:
             text: Input text to synthesize (ignored in VC mode)
             ref_audio: Reference audio for voice cloning (REQUIRED, at 24kHz, max 30s)
-            ref_text: Transcript of reference audio (for zero-shot mode).
-                If not provided and stt_model is set, will auto-transcribe.
+            ref_text: Exact transcript of the reference audio (for zero-shot mode)
             instruct_text: Style instructions (for instruct mode)
             source_audio: Source audio for voice conversion (at 24kHz)
             voice: Ignored (CosyVoice3 uses reference audio)
             speed: Ignored
             lang_code: Ignored (auto-detected)
             temperature: Ignored
+            seed: Optional MLX RNG seed for reproducible LLM sampling
             max_tokens: Maximum tokens to generate
             verbose: Whether to print status
             stream: Whether to stream output
             streaming_interval: Ignored
-            stt_model: Whisper model for auto-transcription (default: whisper-large-v3-turbo-4bit).
-                Set to None to skip transcription and use cross-lingual mode.
+            stt_model: Reserved for API compatibility. CosyVoice3 does not
+                auto-transcribe missing ref_text into zero-shot prompts.
 
         Yields:
             GenerationResult with generated audio
         """
         import time
-
-        import numpy as np
-        from scipy.signal import resample
 
         from mlx_audio.codec.models.s3gen.mel import (
             mel_spectrogram as cosyvoice_mel_spectrogram,
@@ -1075,41 +1267,53 @@ class Model(nn.Module):
         # Load model and tokenizers
         self._ensure_model_loaded()
         self._ensure_tokenizers_loaded()
-
-        # Tokenize text
-        if self._tokenizer is None:
-            raise RuntimeError("Text tokenizer not loaded")
-
-        text_tokens = self._tokenizer.encode(text, add_special_tokens=False)
-        text_array = mx.array([text_tokens], dtype=mx.int32)
-        text_len = mx.array([len(text_tokens)], dtype=mx.int32)
+        if seed is not None:
+            mx.random.seed(seed)
+        explicit_ref_text = (
+            self._normalize_text(ref_text) if ref_text and ref_text.strip() else None
+        )
+        text_chunks = (
+            [] if source_audio is not None else self._split_text_for_inference(text)
+        )
+        if source_audio is None and not text_chunks:
+            raise ValueError("text must not be empty")
 
         # Process reference audio
         ref_audio_np = (
             np.array(ref_audio) if isinstance(ref_audio, mx.array) else ref_audio
         )
 
-        # Truncate reference audio to max 30 seconds
-        max_ref_samples = int(30 * self._sample_rate)
+        # Matches cosyvoice/cli/frontend.py:_extract_speech_token in the
+        # original PyTorch implementation.
+        max_ref_samples = int(MAX_PROMPT_AUDIO_SECONDS * self._sample_rate)
         if len(ref_audio_np) > max_ref_samples:
-            ref_audio_np = ref_audio_np[:max_ref_samples]
+            raise ValueError(
+                "CosyVoice3 reference audio longer than 30 seconds is not "
+                "supported. Trim it to a clean 30-second-or-shorter clip to "
+                "match the original PyTorch implementation."
+            )
 
-        # Trim silence from reference audio
-        import librosa
+        if (
+            explicit_ref_text is None
+            and stt_model is not None
+            and source_audio is None
+            and instruct_text is None
+            and verbose
+        ):
+            logger.info(
+                "CosyVoice3 uses cross-lingual mode when ref_text is not "
+                "provided. Provide ref_text explicitly to use zero-shot."
+            )
 
-        ref_audio_np, _ = librosa.effects.trim(
-            ref_audio_np,
-            top_db=60,
-            frame_length=int(0.025 * self._sample_rate),
-            hop_length=int(0.0125 * self._sample_rate),
+        # Derive 16 kHz tokenizer/speaker features and 24 kHz flow features
+        # separately from the same unclipped reference clip, matching the
+        # original PyTorch frontend.
+        ref_audio_np = np.asarray(ref_audio_np, dtype=np.float32)
+        ref_audio_24k = mx.array(ref_audio_np, dtype=mx.float32)
+        ref_audio_16k = mx.array(
+            _resample_audio(ref_audio_np, self._sample_rate, 16000),
+            dtype=mx.float32,
         )
-
-        # Resample to 16kHz for S3 tokenizer
-        ref_audio_16k = resample(
-            ref_audio_np,
-            int(len(ref_audio_np) * 16000 / self._sample_rate),
-        )
-        ref_audio_16k = mx.array(ref_audio_16k, dtype=mx.float32)
 
         # Get mel spectrogram for S3 tokenizer (128 mels)
         mel_128 = log_mel_spectrogram(ref_audio_16k, n_mels=128)
@@ -1121,8 +1325,8 @@ class Model(nn.Module):
         prompt_speech_token = speech_tokens
         prompt_speech_token_len = speech_token_lens
 
-        # Get mel spectrogram for flow model (80 mels) at 24kHz
-        ref_audio_24k = mx.array(ref_audio_np, dtype=mx.float32)
+        # The original PyTorch CosyVoice3 mel path uses fmax=None / Nyquist
+        # at 24 kHz rather than capping at 8 kHz.
         mel_80 = cosyvoice_mel_spectrogram(
             ref_audio_24k,
             n_fft=1920,
@@ -1131,7 +1335,7 @@ class Model(nn.Module):
             hop_size=480,
             win_size=1920,
             fmin=0,
-            fmax=8000,
+            fmax=None,
             center=False,
         )
         mel_80 = mx.swapaxes(mel_80, 1, 2)  # (1, T, 80)
@@ -1149,35 +1353,12 @@ class Model(nn.Module):
         prompt_speech_token = prompt_speech_token[:, :token_len]
         prompt_speech_token_len = mx.array([token_len], dtype=mx.int32)
 
-        # Auto-transcribe reference audio if ref_text not provided
-        # Skip for VC mode (source_audio) and instruct mode (instruct_text)
-        if (
-            not ref_text
-            and stt_model is not None
-            and source_audio is None
-            and instruct_text is None
-        ):
-            if verbose:
-                logger.info("Transcribing reference audio with Whisper...")
-            from mlx_audio.stt.models.whisper import Model as Whisper
-
-            whisper = Whisper.from_pretrained(path_or_hf_repo=stt_model)
-            ref_text = whisper.generate(ref_audio_16k).text
-            if verbose:
-                logger.info(f"Transcription: {ref_text}")
-            # Clean up whisper model to free memory
-            del whisper
-            mx.clear_cache()
-
-        # Tokenize reference text (for zero-shot mode)
-        # CosyVoice3 requires the format: "You are a helpful assistant.<|endofprompt|>ref text"
-        if ref_text:
-            _SYSTEM_PREFIX = "You are a helpful assistant.<|endofprompt|>"
-            if not ref_text.startswith(_SYSTEM_PREFIX):
-                ref_text = _SYSTEM_PREFIX + ref_text
-            prompt_text_tokens = self._tokenizer.encode(
-                ref_text, add_special_tokens=False
-            )
+        # CosyVoice3 zero-shot mirrors frontend_zero_shot() in the original
+        # PyTorch implementation: only explicit prompt text enables zero-shot.
+        if explicit_ref_text:
+            if not explicit_ref_text.startswith(ZERO_SHOT_PROMPT_PREFIX):
+                explicit_ref_text = ZERO_SHOT_PROMPT_PREFIX + explicit_ref_text
+            prompt_text_tokens = self._tokenize_text(explicit_ref_text)
             prompt_text = mx.array([prompt_text_tokens], dtype=mx.int32)
             prompt_text_len = mx.array([len(prompt_text_tokens)], dtype=mx.int32)
         else:
@@ -1197,15 +1378,18 @@ class Model(nn.Module):
                 else source_audio
             )
 
-            max_source_samples = int(30 * self._sample_rate)
+            max_source_samples = int(MAX_PROMPT_AUDIO_SECONDS * self._sample_rate)
             if len(source_audio_np) > max_source_samples:
-                source_audio_np = source_audio_np[:max_source_samples]
+                raise ValueError(
+                    "CosyVoice3 source audio longer than 30 seconds is not "
+                    "supported. Trim it to 30 seconds or less before voice "
+                    "conversion to match the original PyTorch implementation."
+                )
 
-            source_audio_16k = resample(
-                source_audio_np,
-                int(len(source_audio_np) * 16000 / self._sample_rate),
+            source_audio_16k = mx.array(
+                _resample_audio(source_audio_np, self._sample_rate, 16000),
+                dtype=mx.float32,
             )
-            source_audio_16k = mx.array(source_audio_16k, dtype=mx.float32)
 
             source_mel_128 = log_mel_spectrogram(source_audio_16k, n_mels=128)
             source_mel_128 = mx.expand_dims(source_mel_128, 0)
@@ -1214,6 +1398,19 @@ class Model(nn.Module):
             source_speech_token, source_speech_token_len = self._s3_tokenizer(
                 source_mel_128, source_mel_len_128
             )
+
+        if instruct_text:
+            formatted_instruct = instruct_text
+            if not formatted_instruct.startswith(INSTRUCT_PROMPT_PREFIX):
+                formatted_instruct = INSTRUCT_PROMPT_PREFIX + formatted_instruct
+            if not formatted_instruct.endswith(END_OF_PROMPT):
+                formatted_instruct += END_OF_PROMPT
+            instruct_tokens = self._tokenize_text(formatted_instruct)
+            instruct_array = mx.array([instruct_tokens], dtype=mx.int32)
+            instruct_len = mx.array([len(instruct_tokens)], dtype=mx.int32)
+        else:
+            instruct_array = None
+            instruct_len = None
 
         # Generate audio using appropriate mode
         try:
@@ -1227,115 +1424,146 @@ class Model(nn.Module):
                     prompt_mel_len=prompt_mel_len,
                     speaker_embedding=speaker_embedding,
                 )
-            elif ref_text:
-                audio = self._model.synthesize(
-                    text=text_array,
-                    text_len=text_len,
-                    prompt_text=prompt_text,
-                    prompt_text_len=prompt_text_len,
-                    prompt_speech_token=prompt_speech_token,
-                    prompt_speech_token_len=prompt_speech_token_len,
-                    prompt_mel=prompt_mel,
-                    prompt_mel_len=prompt_mel_len,
-                    speaker_embedding=speaker_embedding,
-                    sampling=25,
-                    max_token_text_ratio=20.0,
-                    min_token_text_ratio=2.0,
-                )
-            elif instruct_text:
-                # CosyVoice3 requires the format:
-                # "You are a helpful assistant. instruction<|endofprompt|>"
-                _INSTRUCT_PREFIX = "You are a helpful assistant. "
-                _END_MARKER = "<|endofprompt|>"
-                if not instruct_text.startswith(_INSTRUCT_PREFIX):
-                    instruct_text = _INSTRUCT_PREFIX + instruct_text
-                if not instruct_text.endswith(_END_MARKER):
-                    instruct_text = instruct_text + _END_MARKER
-                instruct_with_marker = instruct_text
-                instruct_tokens = self._tokenizer.encode(
-                    instruct_with_marker, add_special_tokens=False
-                )
-                instruct_array = mx.array([instruct_tokens], dtype=mx.int32)
-                instruct_len = mx.array([len(instruct_tokens)], dtype=mx.int32)
 
-                audio = self._model.synthesize_instruct(
-                    text=text_array,
-                    text_len=text_len,
-                    instruct_text=instruct_array,
-                    instruct_text_len=instruct_len,
-                    prompt_speech_token=prompt_speech_token,
-                    prompt_speech_token_len=prompt_speech_token_len,
-                    prompt_mel=prompt_mel,
-                    prompt_mel_len=prompt_mel_len,
-                    speaker_embedding=speaker_embedding,
-                    sampling=25,
-                    max_token_text_ratio=20.0,
-                    min_token_text_ratio=2.0,
-                )
-            else:
-                # CosyVoice3 cross-lingual mode requires the format:
-                # "You are a helpful assistant.<|endofprompt|>text"
-                _SYSTEM_PREFIX = "You are a helpful assistant.<|endofprompt|>"
-                if not text.startswith(_SYSTEM_PREFIX):
-                    text = _SYSTEM_PREFIX + text
-                cross_lingual_tokens = self._tokenizer.encode(
-                    text, add_special_tokens=False
-                )
-                text_array = mx.array([cross_lingual_tokens], dtype=mx.int32)
-                text_len = mx.array([len(cross_lingual_tokens)], dtype=mx.int32)
+                audio_out = audio.squeeze()
+                num_samples = audio_out.shape[0]
+                processing_time = time.time() - start_time
+                audio_duration_secs = num_samples / self._sample_rate
+                mins = int(audio_duration_secs // 60)
+                secs = audio_duration_secs % 60
+                duration_str = f"{mins:02d}:{secs:06.3f}"
 
-                audio = self._model.synthesize_cross_lingual(
-                    text=text_array,
-                    text_len=text_len,
-                    prompt_speech_token=prompt_speech_token,
-                    prompt_speech_token_len=prompt_speech_token_len,
-                    prompt_mel=prompt_mel,
-                    prompt_mel_len=prompt_mel_len,
-                    speaker_embedding=speaker_embedding,
-                    sampling=25,
-                    max_token_text_ratio=20.0,
-                    min_token_text_ratio=2.0,
+                yield GenerationResult(
+                    audio=audio_out,
+                    samples=num_samples,
+                    sample_rate=self._sample_rate,
+                    segment_idx=0,
+                    token_count=0,
+                    audio_samples={
+                        "samples": num_samples,
+                        "samples-per-sec": (
+                            num_samples / processing_time if processing_time > 0 else 0
+                        ),
+                    },
+                    audio_duration=duration_str,
+                    real_time_factor=(
+                        processing_time / audio_duration_secs
+                        if audio_duration_secs > 0
+                        else 0
+                    ),
+                    prompt={"tokens-per-sec": 0.0},
+                    processing_time_seconds=processing_time,
+                    peak_memory_usage=(
+                        mx.get_peak_memory() / 1e9
+                        if hasattr(mx, "get_peak_memory")
+                        else 0
+                    ),
+                )
+                return
+
+            for segment_idx, text_chunk in enumerate(text_chunks):
+                segment_start_time = time.time()
+                text_tokens = self._tokenize_text(text_chunk)
+                text_array = mx.array([text_tokens], dtype=mx.int32)
+                text_len = mx.array([len(text_tokens)], dtype=mx.int32)
+
+                if explicit_ref_text:
+                    audio = self._model.synthesize(
+                        text=text_array,
+                        text_len=text_len,
+                        prompt_text=prompt_text,
+                        prompt_text_len=prompt_text_len,
+                        prompt_speech_token=prompt_speech_token,
+                        prompt_speech_token_len=prompt_speech_token_len,
+                        prompt_mel=prompt_mel,
+                        prompt_mel_len=prompt_mel_len,
+                        speaker_embedding=speaker_embedding,
+                        sampling=25,
+                        max_token_text_ratio=20.0,
+                        min_token_text_ratio=2.0,
+                    )
+                elif instruct_array is not None and instruct_len is not None:
+                    audio = self._model.synthesize_instruct(
+                        text=text_array,
+                        text_len=text_len,
+                        instruct_text=instruct_array,
+                        instruct_text_len=instruct_len,
+                        prompt_speech_token=prompt_speech_token,
+                        prompt_speech_token_len=prompt_speech_token_len,
+                        prompt_mel=prompt_mel,
+                        prompt_mel_len=prompt_mel_len,
+                        speaker_embedding=speaker_embedding,
+                        sampling=25,
+                        max_token_text_ratio=20.0,
+                        min_token_text_ratio=2.0,
+                    )
+                else:
+                    formatted_chunk = (
+                        text_chunk
+                        if text_chunk.startswith(ZERO_SHOT_PROMPT_PREFIX)
+                        else ZERO_SHOT_PROMPT_PREFIX + text_chunk
+                    )
+                    cross_lingual_tokens = self._tokenize_text(formatted_chunk)
+                    cross_lingual_array = mx.array(
+                        [cross_lingual_tokens], dtype=mx.int32
+                    )
+                    cross_lingual_len = mx.array(
+                        [len(cross_lingual_tokens)], dtype=mx.int32
+                    )
+
+                    audio = self._model.synthesize_cross_lingual(
+                        text=cross_lingual_array,
+                        text_len=cross_lingual_len,
+                        prompt_speech_token=prompt_speech_token,
+                        prompt_speech_token_len=prompt_speech_token_len,
+                        prompt_mel=prompt_mel,
+                        prompt_mel_len=prompt_mel_len,
+                        speaker_embedding=speaker_embedding,
+                        sampling=25,
+                        max_token_text_ratio=20.0,
+                        min_token_text_ratio=2.0,
+                    )
+
+                audio_out = audio.squeeze()
+                num_samples = audio_out.shape[0]
+                processing_time = time.time() - segment_start_time
+                audio_duration_secs = num_samples / self._sample_rate
+
+                mins = int(audio_duration_secs // 60)
+                secs = audio_duration_secs % 60
+                duration_str = f"{mins:02d}:{secs:06.3f}"
+
+                yield GenerationResult(
+                    audio=audio_out,
+                    samples=num_samples,
+                    sample_rate=self._sample_rate,
+                    segment_idx=segment_idx,
+                    token_count=len(text_tokens),
+                    audio_samples={
+                        "samples": num_samples,
+                        "samples-per-sec": (
+                            num_samples / processing_time if processing_time > 0 else 0
+                        ),
+                    },
+                    audio_duration=duration_str,
+                    real_time_factor=(
+                        processing_time / audio_duration_secs
+                        if audio_duration_secs > 0
+                        else 0
+                    ),
+                    prompt={
+                        "tokens-per-sec": (
+                            len(text_tokens) / processing_time
+                            if processing_time > 0
+                            else 0
+                        )
+                    },
+                    processing_time_seconds=processing_time,
+                    peak_memory_usage=(
+                        mx.get_peak_memory() / 1e9
+                        if hasattr(mx, "get_peak_memory")
+                        else 0
+                    ),
                 )
         except Exception as e:
             raise RuntimeError(f"Audio generation failed: {e}")
-
-        # Squeeze audio to 1D
-        audio_out = audio.squeeze()
-        num_samples = audio_out.shape[0]
-
-        end_time = time.time()
-        processing_time = end_time - start_time
-        audio_duration_secs = num_samples / self._sample_rate
-
-        mins = int(audio_duration_secs // 60)
-        secs = audio_duration_secs % 60
-        duration_str = f"{mins:02d}:{secs:06.3f}"
-
-        result = GenerationResult(
-            audio=audio_out,
-            samples=num_samples,
-            sample_rate=self._sample_rate,
-            segment_idx=0,
-            token_count=len(text_tokens),
-            audio_samples={
-                "samples": num_samples,
-                "samples-per-sec": (
-                    num_samples / processing_time if processing_time > 0 else 0
-                ),
-            },
-            audio_duration=duration_str,
-            real_time_factor=(
-                processing_time / audio_duration_secs if audio_duration_secs > 0 else 0
-            ),
-            prompt={
-                "tokens-per-sec": (
-                    len(text_tokens) / processing_time if processing_time > 0 else 0
-                )
-            },
-            processing_time_seconds=processing_time,
-            peak_memory_usage=(
-                mx.get_peak_memory() / 1e9 if hasattr(mx, "get_peak_memory") else 0
-            ),
-        )
-
-        yield result

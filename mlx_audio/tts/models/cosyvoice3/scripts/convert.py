@@ -46,6 +46,8 @@ from typing import Dict
 import numpy as np
 from huggingface_hub import snapshot_download
 
+from ..special_tokens import COSYVOICE3_TOKENIZER_SPECIAL_TOKENS
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_ID = "FunAudioLLM/Fun-CosyVoice3-0.5B-2512"
@@ -378,8 +380,8 @@ pip install -U mlx-audio-plus
 
 | Mode | Parameters | Description |
 |------|------------|-------------|
-| Cross-lingual | `ref_audio` | Zero-shot TTS (default) |
-| Zero-shot | `ref_audio` + `ref_text` | Better quality with transcription |
+| Cross-lingual | `ref_audio` | Default when `ref_text` is omitted |
+| Zero-shot | `ref_audio` + `ref_text` | Requires the exact transcript of the clipped reference audio |
 | Instruct | `ref_audio` + `instruct_text` | Style control (e.g., "speak slowly") |
 | Voice Conversion | `source_audio` + `ref_audio` | Convert audio to target voice |
 
@@ -389,7 +391,7 @@ pip install -U mlx-audio-plus
 # Cross-lingual (default)
 mlx_audio.tts --model {upload_repo} --text "Hello!" --ref_audio ref.wav
 
-# Zero-shot (with transcription)
+# Zero-shot (the transcript must match the clipped reference audio exactly)
 mlx_audio.tts --model {upload_repo} --text "Hello!" --ref_audio ref.wav --ref_text "Transcription of ref audio."
 
 # Instruct (style control)
@@ -593,7 +595,14 @@ def convert_from_source(
                 from transformers import AutoTokenizer
 
                 logger.info(f"  Loading tokenizer from {subdir or 'root'}...")
-                tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_path))
+                try:
+                    tokenizer = AutoTokenizer.from_pretrained(
+                        str(tokenizer_path),
+                        fix_mistral_regex=True,
+                    )
+                except TypeError:
+                    tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_path))
+                tokenizer.add_special_tokens(COSYVOICE3_TOKENIZER_SPECIAL_TOKENS)
                 tokenizer.save_pretrained(str(output_path))
 
                 # Remove unnecessary tokenizer files (keep only tokenizer.json and tokenizer_config.json)

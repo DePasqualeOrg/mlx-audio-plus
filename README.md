@@ -173,6 +173,12 @@ audio = results[0].audio  # mx.array
 
 See the [Qwen3-TTS README](mlx_audio/tts/models/qwen3_tts/README.md) for voice cloning, CustomVoice, VoiceDesign, and all available models.
 
+### CosyVoice3
+
+Alibaba's multilingual voice cloning model with cross-lingual, zero-shot, instruct, and voice conversion modes.
+
+See the [CosyVoice3 guide](docs/tts/cosyvoice3.md) for the reference-audio requirements, exact zero-shot transcript rules, and Python/CLI examples.
+
 ### CSM (Voice Cloning)
 
 Clone any voice using a reference audio sample:

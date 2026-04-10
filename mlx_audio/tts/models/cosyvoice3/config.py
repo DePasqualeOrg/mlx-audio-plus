@@ -53,7 +53,9 @@ class DiTConfig:
 class FlowConfig:
     """Configuration for Flow Matching module (CosyVoice3 with DiT)."""
 
-    input_size: int = 512
+    # Matches examples/libritts/cosyvoice3/conf/cosyvoice3.yaml
+    # from the original PyTorch implementation.
+    input_size: int = 80
     output_size: int = 80
     spk_embed_dim: int = 192
     output_type: str = "mel"
@@ -65,7 +67,7 @@ class FlowConfig:
     n_timesteps: int = 10
 
     # PreLookaheadLayer config
-    pre_lookahead_channels: int = 512
+    pre_lookahead_channels: int = 1024
 
     # DiT config (embedded)
     dit: DiTConfig = field(default_factory=DiTConfig)
